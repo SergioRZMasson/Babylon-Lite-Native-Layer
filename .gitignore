@@ -1,0 +1,10 @@
+# Build output
+/build/
+/build-min/
+
+# Scratch verification artifacts
+*.tga
+*.png
+
+# Large downloaded model assets
+assets/*.glb
