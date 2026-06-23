@@ -8,3 +8,8 @@
 
 # Large downloaded model assets
 assets/*.glb
+
+# Tooling deps (esbuild for tools/translate_scenes.mjs) + parity run output
+node_modules/
+package-lock.json
+/build/parity-out/

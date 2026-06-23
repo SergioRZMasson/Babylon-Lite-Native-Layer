@@ -35,4 +35,16 @@
         return wrapMesh(__bl_createGround(o.width == null ? 1 : o.width, o.height == null ? 1 : o.height));
     };
     BL.setThinInstances = function (mesh, matrices, count) { __bl_setThinInstances(mesh._id, matrices, count); };
+
+    // Per-instance colors for thin instances: accepted + stored (native per-instance
+    // color is not wired yet, so this is render-inert for now).
+    BL.setThinInstanceColors = function (mesh, colors) { if (mesh) { mesh._thinColors = colors; } };
+
+    // A bare transform node (no geometry) for grouping/parenting. Backed by an empty
+    // native mesh entry so setParent + transforms compose; it never draws.
+    BL.createTransformNode = function (/* name */) {
+        const node = BL._wrapMesh(__bl_createBox(0));
+        node._kind = "transform";
+        return node;
+    };
 })(globalThis.__BL);

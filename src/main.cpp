@@ -347,6 +347,11 @@ int main(int argc, char** argv) {
         if (liteActive) {
             // Babylon-Lite API mirror: native engine owns the whole frame (scene
             // walk → world matrices → cull → draw) from the JS-described scene.
+            // First run any JS onBeforeRender hook (animation, transforms), which
+            // mutates scene state through the __bl_* setters before the native draw.
+            if (host.hasFrameCallback()) {
+                host.callFrame(timeMs, frameNo);
+            }
             lite.renderFrame(timeSec);
         } else if (nativeScene) {
             // Native executor owns the per-frame CPU work; JS did its job at load time.

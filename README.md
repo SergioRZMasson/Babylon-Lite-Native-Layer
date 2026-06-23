@@ -156,6 +156,39 @@ Chakra nearly halves the binary because the engine is the OS-provided DLL instea
   build time through JsRuntimeHost (`JS_ENGINE`). Default Windows engine switched from
   static QuickJS to the in-box **Chakra** (−43–48% `.exe`). ✅ See
   `../.ai/phase6-napi-engine-abstraction.md`.
+- **Phase 7** — **parity-scene run + compare framework**: all 199 Babylon-Lite parity
+  scenes translated to runnable JS (`js/tests/`), a manifest categorizing each by
+  required API, and a runner that renders each headless and computes MAD vs the
+  reference goldens. First feature batch (directional/point/spot lights, fog hook,
+  solid textures, `onBeforeRender`, tuple colors) lands procedural scenes. ✅ See
+  `../.ai/phase7-parity-framework.md`.
+
+## Parity test framework (Phase 7)
+
+Run Babylon-Lite's parity scenes in the native host and compare to the reference
+goldens. Tooling lives in `tools/`; the JS scene equivalents in `js/tests/`.
+
+```powershell
+# 1. (once) install esbuild for the translator
+npm install --no-save esbuild
+
+# 2. translate every lab/lite/src/lite/sceneN.ts -> js/tests/<slug>.js (ES2017)
+node tools/translate_scenes.mjs
+
+# 3. categorize all scenes -> js/tests/manifest.json (id, tags, golden?, missing API)
+python tools/gen_manifest.py
+
+# 4. run + compare (needs Pillow): app.exe per scene, screenshot @1280x720, MAD vs golden
+python tools/run_parity.py --filter supported     # or: --filter golden | all | --ids 2,3,6
+```
+
+Outcome per scene: `compared` (MAD reported), `rendered` (content, no local golden),
+`blank`, `js-error` (unsupported API — message captured), `timeout`. The report is
+written to `build/parity-out/report.json`. **Status:** 199/199 translate + run; the
+first feature batch renders the procedural/standard scenes (sphere, fog boxes, emissive
+grid of 2500 spheres, spotlights). The long tail errors on subsystems not yet built
+(NME, sprites, physics, shadows, gaussian splatting, navigation, animation, gizmos) —
+the manifest's `missingApi` prioritizes them.
 
 ## Phase 4: glTF + PBR (BoomBox)
 

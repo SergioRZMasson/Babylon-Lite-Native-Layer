@@ -16,7 +16,7 @@
         g.document = {
             getElementById: function () {
                 return {
-                    _kind: "canvas", width: 0, height: 0,
+                    _kind: "canvas", width: 0, height: 0, dataset: {},
                     getContext: function () { return null; },
                     addEventListener: function () {}, removeEventListener: function () {},
                     getBoundingClientRect: function () { return { width: 0, height: 0, left: 0, top: 0 }; },
@@ -26,6 +26,28 @@
         };
     }
     if (typeof g.window === "undefined") { g.window = g; }
+    if (typeof g.window.location === "undefined") { g.window.location = { search: "", href: "", pathname: "/" }; }
+    // performance.now (Chakra has no `performance`).
+    if (typeof g.performance === "undefined") {
+        var _t0 = Date.now();
+        g.performance = { now: function () { return Date.now() - _t0; } };
+    }
+    // Minimal URLSearchParams (in-box Chakra lacks it). Parses "?a=1&b=2".
+    if (typeof g.URLSearchParams === "undefined") {
+        g.URLSearchParams = function (q) {
+            var map = {};
+            if (q) {
+                if (q.charAt(0) === "?") { q = q.slice(1); }
+                var parts = q.split("&");
+                for (var i = 0; i < parts.length; i++) {
+                    if (!parts[i]) { continue; }
+                    var kv = parts[i].split("=");
+                    map[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || "");
+                }
+            }
+            this.get = function (k) { return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null; };
+        };
+    }
 
     g.__BL = g.__BL || {};
 
@@ -38,6 +60,7 @@
     __bl_require("light.js");
     __bl_require("mesh.js");
     __bl_require("material.js");
+    __bl_require("texture.js");
     __bl_require("loaders/gltf.js");
     __bl_require("loaders/environment.js");
 
@@ -45,9 +68,13 @@
     const BL = g.__BL;
     const pub = [
         "createEngine", "createSceneContext", "createArcRotateCamera", "createDefaultCamera",
-        "createHemisphericLight", "createBox", "createSphere", "createGround",
-        "createStandardMaterial", "createPbrMaterial", "loadGltf", "loadEnvironment",
-        "setThinInstances", "addToScene", "registerScene", "startEngine", "attachControl", "mat4Compose",
+        "createHemisphericLight", "createDirectionalLight", "createPointLight", "createSpotLight",
+        "createBox", "createSphere", "createGround",
+        "createStandardMaterial", "createPbrMaterial", "createSolidTexture2D",
+        "loadGltf", "loadEnvironment", "loadSkybox", "setFog",
+        "setThinInstances", "setThinInstanceColors", "addToScene", "removeFromScene",
+        "registerScene", "startEngine", "stopEngine",
+        "attachControl", "onBeforeRender", "setParent", "createTransformNode", "mat4Compose",
     ];
     for (let i = 0; i < pub.length; i++) { if (BL[pub[i]]) { g[pub[i]] = BL[pub[i]]; } }
 

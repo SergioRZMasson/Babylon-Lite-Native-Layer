@@ -24,6 +24,23 @@
         return c;
     };
 
+    // Define a Babylon-style color property that accepts assignment from a [r,g,b]
+    // tuple, a {r,g,b}/Color3 object, OR per-channel mutation (col.r = ...). Mirrors how
+    // Babylon-Lite scenes write either `mat.diffuseColor = [1,1,0]` or `.diffuseColor.r = 1`.
+    BL.makeColorProp = function (obj, name, r, g, b, onChange) {
+        const col = BL.makeColor3(r, g, b, onChange);
+        Object.defineProperty(obj, name, {
+            get() { return col; },
+            set(v) {
+                if (Array.isArray(v)) { col.set(v[0], v[1], v[2]); }
+                else if (v && typeof v === "object") {
+                    col.set(v.r != null ? v.r : v[0], v.g != null ? v.g : v[1], v.b != null ? v.b : v[2]);
+                }
+            },
+        });
+        return col;
+    };
+
     // Shared state across modules (e.g. model bounds from the last glTF load, used by
     // createDefaultCamera). Mirrors how Babylon's createDefaultCamera reads scene bounds.
     BL._state = { lastSceneId: -1, bounds: null };

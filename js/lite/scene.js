@@ -44,4 +44,37 @@
     };
 
     BL.attachControl = function (/* camera, canvas, scene */) { /* orbit input not wired yet */ };
+
+    // Fog: accepted + stored (native fog shading not yet implemented, so this is a
+    // no-op on the render side; the scene still renders without error).
+    BL.setFog = function (scene, opts) { if (scene) { scene._fog = opts || null; } };
+
+    // Skybox / environment background: not rendered natively yet. Accept the call so
+    // scenes load; meshes still render against the clear color.
+    BL.loadSkybox = function (/* scene, url, ext */) { return Promise.resolve(); };
+
+    // Per-frame hook. Babylon-Lite calls the callbacks with a frame delta (ms) before
+    // each render. We route them through the host's single frame callback; the native
+    // lite render loop invokes it each frame (see main.cpp lite branch).
+    BL.onBeforeRender = function (scene, cb) {
+        const st = BL._state;
+        st.frameCbs = st.frameCbs || [];
+        st.frameCbs.push(cb);
+        if (!st.frameCbInstalled && typeof setFrameCallback === "function") {
+            st.frameCbInstalled = true;
+            setFrameCallback(function (timeMs /*, frameNo */) {
+                const dt = st.lastFrameMs == null ? 16 : (timeMs - st.lastFrameMs);
+                st.lastFrameMs = timeMs;
+                for (let i = 0; i < st.frameCbs.length; i++) { st.frameCbs[i](dt); }
+            });
+        }
+    };
+
+    BL.stopEngine = function (/* engine */) { return Promise.resolve(); };
+
+    BL.removeFromScene = function (/* scene, entity */) { /* dynamic removal not wired yet */ };
+
+    // setParent(child, parent): mirrors Babylon's reparenting (world-preserving on the
+    // native side via the mesh hierarchy).
+    BL.setParent = function (child, parent) { if (child) { child.parent = parent || null; } };
 })(globalThis.__BL);

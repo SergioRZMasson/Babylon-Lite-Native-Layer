@@ -477,6 +477,14 @@ void Engine::registerOn(js::Host& host) {
         return Napi::Number::New(env, id);
     });
 
+    host.registerFunction("__bl_createSolidTexture", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        Napi::Env env = info.Env();
+        if (!gfx_) { return Napi::Number::New(env, -1); }
+        auto c8 = [](double v) -> uint8_t { v = v < 0 ? 0 : (v > 1 ? 1 : v); return uint8_t(v * 255.0 + 0.5); };
+        const uint8_t px[4] = { c8(argf(info, 0, 1)), c8(argf(info, 1, 1)), c8(argf(info, 2, 1)), 255 };
+        return Napi::Number::New(env, gfx_->createTexture2D(1, 1, px));
+    });
+
     host.registerFunction("__bl_createPbrMaterial", [this](const Napi::CallbackInfo& info) -> Napi::Value {
         Material m;
         m.isPbr = true;
