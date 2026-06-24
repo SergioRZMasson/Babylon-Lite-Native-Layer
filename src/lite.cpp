@@ -159,7 +159,26 @@ void Engine::computeWorld(int meshId) {
     m.worldDone = true;
 }
 
-// Babylon RH→LH root conversion: diag(-1,1,1) (negate X), applied to root node locals.
+// Rebuild a procedurally-generated primitive (created in the standard pos/normal layout)
+// in the PBR vertex layout (pos/normal/uv/tangent) so it can be drawn by the PBR program
+// with image-based lighting. UVs default to (0,0) (correct for the solid-colour textures
+// these primitives use) and tangents to a default basis. Called when a PBR material is
+// assigned to a procedural mesh. No-op for glTF meshes (already PBR) or meshes lacking
+// retained geometry.
+void Engine::convertMeshToPBR(int meshId) {
+    if (meshId < 0 || meshId >= int(meshes_.size()) || !gfx_) { return; }
+    Mesh& m = meshes_[size_t(meshId)];
+    if (m.pbr) { return; }
+    if (m.rawPos.empty() || m.rawNrm.empty() || m.rawIdx.empty()) { return; }
+    const int gid = gfx_->createMeshPBR(
+        m.rawPos.data(), uint32_t(m.rawPos.size()),
+        m.rawNrm.data(), uint32_t(m.rawNrm.size()),
+        nullptr, 0, nullptr, 0,
+        m.rawIdx.data(), uint32_t(m.rawIdx.size()), /*index32=*/false);
+    if (gid < 0) { return; }
+    m.geomId = gid;
+    m.pbr = true;
+}
 static const float kRhToLh[16] = { -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
 void Engine::computeNodeWorld(int idx) {
@@ -285,6 +304,13 @@ int Engine::renderFrame(float timeSec) {
         // PBR direct light + a hemispheric ambient stand-in for IBL (no env yet).
         gfx_->setPbrLight(l.dir[0], l.dir[1], l.dir[2],
                           l.diffuse[0] * l.intensity, l.diffuse[1] * l.intensity, l.diffuse[2] * l.intensity,
+                          0.55f, 0.57f, 0.6f, 0.20f, 0.19f, 0.18f);
+    } else {
+        // No scene light: zero the PBR direct term so it doesn't fall back to the default
+        // white light. Environment-lit PBR scenes (e.g. a lone IBL sphere) are then lit
+        // purely by IBL; non-IBL PBR scenes still get the hemispheric ambient stand-in.
+        // (The standard-shader hemispheric light is left untouched to avoid regressions.)
+        gfx_->setPbrLight(0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
                           0.55f, 0.57f, 0.6f, 0.20f, 0.19f, 0.18f);
     }
 
@@ -468,7 +494,12 @@ void Engine::registerOn(js::Host& host) {
         Mesh m;
         m.geomId = gid;
         m.boundRadius = geo.radius;
-        meshes_.push_back(m);
+        // Retain the raw geometry so the mesh can be rebuilt in the PBR layout if a PBR
+        // material is later assigned (the standard layout has no UV/tangent attributes).
+        m.rawPos = std::move(geo.pos);
+        m.rawNrm = std::move(geo.nrm);
+        m.rawIdx = std::move(geo.idx);
+        meshes_.push_back(std::move(m));
         return int(meshes_.size() - 1);
     };
     host.registerFunction("__bl_createBox", [this, addMesh](const Napi::CallbackInfo& info) -> Napi::Value {
@@ -507,7 +538,15 @@ void Engine::registerOn(js::Host& host) {
     host.registerFunction("__bl_setMeshMaterial", [this](const Napi::CallbackInfo& info) -> Napi::Value {
         const int m = int(argf(info, 0, -1));
         const int mat = int(argf(info, 1, -1));
-        if (m >= 0 && m < int(meshes_.size())) { meshes_[size_t(m)].materialId = mat; }
+        if (m >= 0 && m < int(meshes_.size())) {
+            meshes_[size_t(m)].materialId = mat;
+            // A PBR material on a procedural primitive needs the PBR vertex layout +
+            // program; rebuild the mesh geometry so it renders with real PBR + IBL.
+            if (mat >= 0 && mat < int(materials_.size()) && materials_[size_t(mat)].isPbr
+                && !meshes_[size_t(m)].pbr) {
+                convertMeshToPBR(m);
+            }
+        }
         return info.Env().Undefined();
     });
 
@@ -675,6 +714,42 @@ void Engine::registerOn(js::Host& host) {
         const int id = int(argf(info, 0, -1));
         const int skin = int(argf(info, 1, -1));
         if (id >= 0 && id < int(meshes_.size())) { meshes_[size_t(id)].skin = skin; }
+        return info.Env().Undefined();
+    });
+
+    // ---- image-based lighting (environment) ----
+    host.registerFunction("__bl_createEnvironment", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        if (gfx_) { gfx_->createEnvironment(int(argf(info, 0, 128)), int(argf(info, 1, 1))); }
+        return info.Env().Undefined();
+    });
+    // Upload one prefiltered specular face: (mip, face, pngBytes). PNG decoded via stb;
+    // gfx applies the RGBD→HDR decode and uploads to the cubemap face/mip.
+    host.registerFunction("__bl_setEnvFace", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        if (!gfx_) { return info.Env().Undefined(); }
+        const int mip = int(argf(info, 0, 0));
+        const int face = int(argf(info, 1, 0));
+        size_t bytes = 0;
+        const uint8_t* png = js::argBytes(info, 2, &bytes);
+        if (!png || bytes == 0) { return info.Env().Undefined(); }
+        int w = 0, h = 0, comp = 0;
+        stbi_uc* px = stbi_load_from_memory(png, int(bytes), &w, &h, &comp, 4);
+        if (px) {
+            gfx_->uploadEnvFace(mip, face, w, h, px);
+            stbi_image_free(px);
+        }
+        return info.Env().Undefined();
+    });
+    // 9 pre-scaled SH irradiance vec4 (36 floats).
+    host.registerFunction("__bl_setEnvSH", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        size_t bytes = 0;
+        const uint8_t* sh = js::argBytes(info, 0, &bytes);
+        if (gfx_ && sh && bytes >= 36 * sizeof(float)) {
+            gfx_->setEnvironmentSH(reinterpret_cast<const float*>(sh));
+        }
+        return info.Env().Undefined();
+    });
+    host.registerFunction("__bl_setEnvParams", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        if (gfx_) { gfx_->setEnvironmentParams(float(argf(info, 0, 1)), float(argf(info, 1, 1))); }
         return info.Env().Undefined();
     });
 

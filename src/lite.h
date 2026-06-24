@@ -61,6 +61,11 @@ struct Mesh {
     float boundRadius = 1.0f;   // local bounding-sphere radius (pre-scale)
     std::vector<float> thin;    // 16 floats per thin-instance (optional)
     int thinCount = 0;
+    // Retained procedural geometry (pos/normal/idx) so a primitive built natively in the
+    // standard layout can be rebuilt in the PBR vertex layout if a PBR material is later
+    // assigned (createSphere + createPbrMaterial). Empty for glTF meshes.
+    std::vector<float> rawPos, rawNrm;
+    std::vector<uint16_t> rawIdx;
     float world[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
     bool worldDone = false;     // per-frame guard for parent-first composition
 };
@@ -134,6 +139,7 @@ public:
 
 private:
     void computeWorld(int meshId);
+    void convertMeshToPBR(int meshId);    // rebuild a procedural mesh in the PBR layout
     void computeNodeWorld(int nodeIdx);   // recursive, root applies RH→LH (diag(-1,1,1))
     void updateAnimations(float dt);      // advance + sample active clips, write node TRS
     void sampleChannel(const AnimClip& clip, const AnimChannel& ch, float time, float* out4);

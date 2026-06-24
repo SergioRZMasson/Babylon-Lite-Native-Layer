@@ -95,6 +95,16 @@ public:
     void drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
                             const float* bonePalette, int boneCount, const PbrDraw& mat);
 
+    // ---- Image-based lighting (environment) ----
+    // Create the prefiltered specular cubemap (RGBA16F, `numMips` mip levels, `faceSize`²).
+    void createEnvironment(int faceSize, int numMips);
+    // Upload one cubemap face/mip from RGBD-encoded RGBA8 pixels (decoded to linear HDR half).
+    void uploadEnvFace(int mip, int face, int width, int height, const uint8_t* rgba8);
+    // 9 pre-scaled SH irradiance coefficients (36 floats = 9 × vec4, rgb + pad).
+    void setEnvironmentSH(const float* sh36);
+    // Activate IBL with the given environment intensity + tonemap exposure.
+    void setEnvironmentParams(float intensity, float exposure);
+
 private:
     struct Mesh {
         bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
@@ -135,6 +145,14 @@ private:
     bgfx::UniformHandle sNormalTex_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle sEmissive_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle sOcclusion_ = BGFX_INVALID_HANDLE;
+    // IBL / environment.
+    bgfx::TextureHandle envCube_ = BGFX_INVALID_HANDLE;     // prefiltered specular cubemap
+    bgfx::TextureHandle blackCube_ = BGFX_INVALID_HANDLE;   // 1x1 default when no env bound
+    bgfx::UniformHandle sEnvSpecular_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle uEnvParams_ = BGFX_INVALID_HANDLE;  // x=numMips,y=intensity,z=hasEnv,w=exposure
+    bgfx::UniformHandle uEnvSH_ = BGFX_INVALID_HANDLE;      // 9 × vec4
+    float envParams_[4] = { 1.0f, 1.0f, 0.0f, 1.0f };
+    float envSH_[36] = { 0 };
     float pbrLightDir_[4] = { 0, 1, 0, 0 };
     float pbrLightColor_[4] = { 1, 1, 1, 1 };
     float pbrAmbientSky_[4] = { 0.4f, 0.45f, 0.5f, 1 };

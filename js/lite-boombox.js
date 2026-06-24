@@ -3,10 +3,10 @@
 // missing `import { ... } from "babylon-lite"` line; the prelude installs the same
 // API. It loads a glTF PBR model and renders it through the native C++/bgfx engine.
 //
-// NOTE: loadEnvironment (IBL specular cubemap + skybox + ground + BRDF LUT) is a
-// stand-in in this prototype, so lighting is direct + hemispheric ambient, not the
-// image-based lighting of the parity golden. PBR materials + glTF geometry/textures
-// are real.
+// NOTE: loadEnvironment now parses the Babylon `.env` into a prefiltered specular
+// cubemap + SH irradiance and lights the PBR materials with real image-based lighting
+// (SH diffuse + prefiltered-cube specular + ACES tone mapping). The skybox/ground
+// background and HDR (.hdr) path are still stand-ins; reflections + glTF are real.
 
 async function main() {
     const canvas = document.getElementById("renderCanvas");

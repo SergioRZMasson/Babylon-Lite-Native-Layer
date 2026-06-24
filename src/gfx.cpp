@@ -119,6 +119,10 @@ bool Gfx::initialize() {
     sNormalTex_ = bgfx::createUniform("s_normalTex", bgfx::UniformType::Sampler);
     sEmissive_ = bgfx::createUniform("s_emissive", bgfx::UniformType::Sampler);
     sOcclusion_ = bgfx::createUniform("s_occlusion", bgfx::UniformType::Sampler);
+    // IBL / environment uniforms.
+    sEnvSpecular_ = bgfx::createUniform("s_envSpecular", bgfx::UniformType::Sampler);
+    uEnvParams_ = bgfx::createUniform("u_envParams", bgfx::UniformType::Vec4);
+    uEnvSH_ = bgfx::createUniform("u_envSH", bgfx::UniformType::Vec4, 9);
 
     // ---- Skinned PBR pipeline (vs_skinned + fs_pbr) ----
     pbrSkinnedLayout_.begin()
@@ -148,7 +152,53 @@ bool Gfx::initialize() {
     const uint8_t flatN[4] = { 128, 128, 255, 255 };
     whiteTex_ = bgfx::createTexture2D(1, 1, false, 1, bgfx::TextureFormat::RGBA8, 0, bgfx::copy(white, 4));
     flatNormalTex_ = bgfx::createTexture2D(1, 1, false, 1, bgfx::TextureFormat::RGBA8, 0, bgfx::copy(flatN, 4));
+    // Default 1x1 black cubemap so s_envSpecular is always bound (no-IBL scenes).
+    {
+        const uint8_t black[4] = { 0, 0, 0, 255 };
+        blackCube_ = bgfx::createTextureCube(1, false, 1, bgfx::TextureFormat::RGBA8);
+        for (int f = 0; f < 6; ++f) {
+            bgfx::updateTextureCube(blackCube_, 0, uint8_t(f), 0, 0, 0, 1, 1, bgfx::copy(black, 4));
+        }
+    }
     return true;
+}
+
+void Gfx::createEnvironment(int faceSize, int numMips) {
+    if (bgfx::isValid(envCube_)) { bgfx::destroy(envCube_); }
+    envCube_ = bgfx::createTextureCube(uint16_t(faceSize), numMips > 1, 1,
+                                       bgfx::TextureFormat::RGBA16F,
+                                       BGFX_SAMPLER_NONE);
+    envParams_[0] = float(numMips);
+}
+
+void Gfx::uploadEnvFace(int mip, int face, int width, int height, const uint8_t* rgba8) {
+    if (!bgfx::isValid(envCube_) || !rgba8) { return; }
+    // RGBD decode → linear HDR (rgb = pow(c,2.2)/max(a,1/255)), then float→half RGBA16F.
+    const int n = width * height;
+    std::vector<uint16_t> half(size_t(n) * 4);
+    for (int i = 0; i < n; ++i) {
+        const float r = std::pow(rgba8[i * 4 + 0] / 255.0f, 2.2f);
+        const float g = std::pow(rgba8[i * 4 + 1] / 255.0f, 2.2f);
+        const float b = std::pow(rgba8[i * 4 + 2] / 255.0f, 2.2f);
+        const float d = std::fmax(rgba8[i * 4 + 3] / 255.0f, 1.0f / 255.0f);
+        half[size_t(i) * 4 + 0] = bx::halfFromFloat(r / d);
+        half[size_t(i) * 4 + 1] = bx::halfFromFloat(g / d);
+        half[size_t(i) * 4 + 2] = bx::halfFromFloat(b / d);
+        half[size_t(i) * 4 + 3] = bx::halfFromFloat(1.0f);
+    }
+    const bgfx::Memory* mem = bgfx::copy(half.data(), uint32_t(half.size() * sizeof(uint16_t)));
+    bgfx::updateTextureCube(envCube_, 0, uint8_t(face), uint8_t(mip), 0, 0,
+                            uint16_t(width), uint16_t(height), mem);
+}
+
+void Gfx::setEnvironmentSH(const float* sh36) {
+    if (sh36) { std::memcpy(envSH_, sh36, sizeof(envSH_)); }
+}
+
+void Gfx::setEnvironmentParams(float intensity, float exposure) {
+    envParams_[1] = intensity;
+    envParams_[2] = 1.0f; // hasEnv
+    envParams_[3] = exposure;
 }
 
 void Gfx::shutdown() {
@@ -388,6 +438,9 @@ void Gfx::drawMeshPBR(int meshId, const float worldMatrix[16], const PbrDraw& ma
     bgfx::setTexture(2, sNormalTex_, texOr(mat.texNormal, flatNormalTex_));
     bgfx::setTexture(3, sEmissive_, texOr(mat.texEmissive, whiteTex_));
     bgfx::setTexture(4, sOcclusion_, texOr(mat.texOcclusion, whiteTex_));
+    bgfx::setUniform(uEnvParams_, envParams_);
+    bgfx::setUniform(uEnvSH_, envSH_, 9);
+    bgfx::setTexture(5, sEnvSpecular_, bgfx::isValid(envCube_) ? envCube_ : blackCube_);
 
     bgfx::setTransform(worldMatrix);
     bgfx::setVertexBuffer(0, m.vbh);
@@ -473,6 +526,9 @@ void Gfx::drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
     bgfx::setTexture(2, sNormalTex_, texOr(mat.texNormal, flatNormalTex_));
     bgfx::setTexture(3, sEmissive_, texOr(mat.texEmissive, whiteTex_));
     bgfx::setTexture(4, sOcclusion_, texOr(mat.texOcclusion, whiteTex_));
+    bgfx::setUniform(uEnvParams_, envParams_);
+    bgfx::setUniform(uEnvSH_, envSH_, 9);
+    bgfx::setTexture(5, sEnvSpecular_, bgfx::isValid(envCube_) ? envCube_ : blackCube_);
 
     bgfx::setTransform(worldMatrix);
     bgfx::setVertexBuffer(0, m.vbh);

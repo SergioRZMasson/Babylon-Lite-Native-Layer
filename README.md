@@ -177,6 +177,30 @@ Chakra nearly halves the binary because the engine is the OS-provided DLL instea
   SLERP), world-matrix recompose, and bone-palette computation all native. `loadGltf`
   returns animation groups; `playAnimation`/`goToFrame`/etc. drive native playback. ✅
   See `../.ai/phase9-animation-skinning.md`.
+- **Phase 10** — **environment maps / image-based lighting (IBL)**: `loadEnvironment`
+  parses a Babylon `.env` (prefiltered specular cubemap + SH irradiance) in JS and pushes
+  it to a native bgfx RGBA16F cubemap; the PBR shader does SH diffuse + prefiltered-cube
+  specular IBL + ACES tone mapping. BoomBox now shows realistic metallic reflections. ✅
+  See `../.ai/phase10-ibl-environment.md`.
+
+## Environment maps / IBL (Phase 10)
+
+PBR materials can be lit by an environment instead of the hemispheric stand-in. The JS
+loader parses a Babylon `.env` (8-byte magic + JSON manifest + RGBD-encoded PNG faces),
+converts the 9 SH polynomial coefficients to pre-scaled harmonics, and uploads the 8 mip
+levels × 6 faces to a native cubemap; the fragment shader evaluates SH irradiance for
+diffuse and samples the prefiltered cube (LOD from roughness) for specular, with an
+analytic env-BRDF and ACES tone mapping. Scenes without an environment fall back to the
+previous hemispheric + Reinhard path unchanged.
+
+```bat
+:: BoomBox lit by environmentSpecular.env (headless: add --frames 3 --screenshot out.tga)
+build\bin\app.exe --prelude js\lite\index.js --script js\lite-boombox.js
+```
+
+Gaps toward strict parity: skybox/ground background not drawn, `loadHdrEnvironment`
+(`.hdr`) not implemented, analytic BRDF instead of the BRDF-LUT texture, simplified
+specular LOD, and `.env` contrast not yet applied. See `../.ai/phase10-ibl-environment.md`.
 
 ## Animation + skeletal animation (Phase 9)
 

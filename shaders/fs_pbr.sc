@@ -1,9 +1,10 @@
 $input v_normal, v_wpos, v_uv, v_tangent
 
-// glTF metallic-roughness PBR (Cook-Torrance), with base-color / metallic-roughness /
-// normal / emissive / occlusion textures, a single direct light, and a hemispheric
-// ambient approximation. NOTE: this is direct + crude ambient only — no image-based
-// lighting yet, so it will not match the IBL-lit scene1 golden (that's the next stage).
+// glTF metallic-roughness PBR (Cook-Torrance) with base-color / metallic-roughness /
+// normal / emissive / occlusion textures, a single direct light, and — when an
+// environment is bound — image-based lighting (IBL): SH irradiance for diffuse +
+// a prefiltered specular cubemap (split-sum) for specular, with ACES tonemapping.
+// Falls back to a hemispheric ambient approximation when no environment is set.
 
 #include <bgfx_shader.sh>
 
@@ -12,6 +13,7 @@ SAMPLER2D(s_metalRough, 1);
 SAMPLER2D(s_normalTex, 2);
 SAMPLER2D(s_emissive, 3);
 SAMPLER2D(s_occlusion, 4);
+SAMPLERCUBE(s_envSpecular, 5);
 
 uniform vec4 u_baseColorFactor;  // rgba
 uniform vec4 u_mrParams;         // x=metallic, y=roughness, z=occlusionStrength, w=alphaCutoff
@@ -20,9 +22,11 @@ uniform vec4 u_texFlags;         // x=baseTex, y=mrTex, z=normalTex, w=emissiveT
 uniform vec4 u_occFlag;          // x=occlusionTex (1/0)
 uniform vec4 u_lightDir;         // xyz = direction to light
 uniform vec4 u_lightColor;       // rgb * intensity
-uniform vec4 u_ambientSky;       // rgb hemispheric up colour
-uniform vec4 u_ambientGround;    // rgb hemispheric down colour
+uniform vec4 u_ambientSky;       // rgb hemispheric up colour (no-IBL fallback)
+uniform vec4 u_ambientGround;    // rgb hemispheric down colour (no-IBL fallback)
 uniform vec4 u_eyePos;           // xyz
+uniform vec4 u_envParams;        // x=numMips, y=intensity, z=hasEnv(1/0), w=exposure
+uniform vec4 u_envSH[9];         // pre-scaled SH irradiance (L00,L1_1,L10,L11,L2_2,L2_1,L20,L21,L22)
 
 #define PI 3.14159265359
 
@@ -42,6 +46,32 @@ float geometrySmith(float NdotV, float NdotL, float rough) {
 }
 vec3 fresnelSchlick(float cosT, vec3 F0) {
 	return F0 + (vec3_splat(1.0) - F0) * pow(1.0 - cosT, 5.0);
+}
+
+// SH irradiance from the 9 pre-scaled harmonics (Babylon polynomial→harmonics form).
+vec3 shIrradiance(vec3 n) {
+	return u_envSH[0].rgb
+		+ u_envSH[1].rgb * n.y
+		+ u_envSH[2].rgb * n.z
+		+ u_envSH[3].rgb * n.x
+		+ u_envSH[4].rgb * (n.y * n.x)
+		+ u_envSH[5].rgb * (n.y * n.z)
+		+ u_envSH[6].rgb * (3.0 * n.z * n.z - 1.0)
+		+ u_envSH[7].rgb * (n.z * n.x)
+		+ u_envSH[8].rgb * (n.x * n.x - n.y * n.y);
+}
+
+// Analytic environment-BRDF approximation (Karis) — avoids a BRDF LUT texture.
+vec2 envBRDFApprox(float NoV, float roughness) {
+	vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+	vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+	vec4 r = roughness * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+	return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+vec3 acesFilm(vec3 x) {
+	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
 void main()
@@ -101,15 +131,38 @@ void main()
 
 	vec3 direct = (kd * diffuseColor / PI + spec) * u_lightColor.rgb * NdotL;
 
-	// Hemispheric ambient (no IBL): diffuse from sky/ground, plus a cheap spec ambient.
-	vec3 ambColor = mix(u_ambientGround.rgb, u_ambientSky.rgb, N.y * 0.5 + 0.5);
-	vec3 ambient = diffuseColor * ambColor * occlusion + F0 * ambColor * 0.5;
+	vec3 ambient;
+	if (u_envParams.z > 0.5) {
+		// Image-based lighting: SH diffuse irradiance + prefiltered specular (split-sum).
+		vec3 irr = max(shIrradiance(N), vec3_splat(0.0));
+		vec3 diffuseIBL = irr * diffuseColor * occlusion;
+
+		vec3 R = reflect(-V, N);
+		float lod = roughness * max(u_envParams.x - 1.0, 0.0);
+		vec3 prefiltered = textureCubeLod(s_envSpecular, R, lod).rgb;
+		vec2 ab = envBRDFApprox(NdotV, roughness);
+		vec3 specularIBL = prefiltered * (F0 * ab.x + vec3_splat(ab.y)) * occlusion;
+
+		ambient = (diffuseIBL + specularIBL) * u_envParams.y;
+	} else {
+		// Hemispheric ambient fallback (no environment bound).
+		vec3 ambColor = mix(u_ambientGround.rgb, u_ambientSky.rgb, N.y * 0.5 + 0.5);
+		ambient = diffuseColor * ambColor * occlusion + F0 * ambColor * 0.5;
+	}
 
 	vec3 color = direct + ambient + emissive;
 
-	// Reinhard tonemap + gamma (placeholder until ACES + exposure in the IBL stage).
-	color = color / (color + vec3_splat(1.0));
-	color = pow(color, vec3_splat(1.0 / 2.2));
+	if (u_envParams.z > 0.5) {
+		// ACES tonemap + exposure + gamma (matches the .env image-processing path).
+		color *= u_envParams.w;
+		color = acesFilm(color);
+		color = pow(color, vec3_splat(1.0 / 2.2));
+	} else {
+		// Reinhard fallback for non-IBL scenes (unchanged behaviour).
+		color = color / (color + vec3_splat(1.0));
+		color = pow(color, vec3_splat(1.0 / 2.2));
+	}
 
 	gl_FragColor = vec4(color, baseColor.a);
 }
+
