@@ -70,9 +70,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target app
 ```
 
-The first configure clones bgfx (BabylonJS fork, pinned to Babylon Native's tag)
-and JsRuntimeHost (for the Node-API `napi` target — same commit Babylon Native pins).
-The first build also compiles bgfx's `shaderc` (slow, one-time).
+The first configure clones bgfx (BabylonJS fork, pinned to Babylon Native's tag) and
+JsRuntimeHost (Node-API + the URL/XMLHttpRequest polyfills + `UrlLib`, all pinned to the
+commit Babylon Native uses). The first build also compiles bgfx's `shaderc` (slow,
+one-time). The standard build includes the HTTP polyfills (see below).
 
 ### JS engine selection
 
@@ -89,29 +90,31 @@ to ship, and the engine is *not* statically linked into the `.exe`). Note the in
 Chakra is frozen at ~ES2017, so the host installs a small `globalThis` shim; the
 Babylon-Lite JS here avoids ES2019+ syntax (no `?.` / `??`).
 
-### Polyfills (browser-like globals, optional)
+### Polyfills (browser-like globals)
 
 JsRuntimeHost ships browser-like features as separate Node-API polyfill **static
 libraries**, each toggled at configure time — the same model Babylon Native uses. Two are
-wired here (both OFF by default to keep the minimal build lean):
-
-```powershell
-cmake -S . -B build-net -G Ninja -DCMAKE_BUILD_TYPE=Release `
-      -DBL_POLYFILL_URL=ON -DBL_POLYFILL_XMLHTTPREQUEST=ON
-cmake --build build-net --target app
-```
+wired here and **enabled by default** (the standard build above includes them):
 
 - `BL_POLYFILL_URL` — `URL` / `URLSearchParams`.
 - `BL_POLYFILL_XMLHTTPREQUEST` — `XMLHttpRequest` (HTTP; pulls JsRuntimeHost's `UrlLib`, a
   native Win32 HTTP client — no curl).
 
-When enabled, **scenes download their assets over HTTP on demand**: `loadGltf` /
+Because they're on, **scenes download their assets over HTTP on demand**: `loadGltf` /
 `loadEnvironment` fetch a remote model/`.env` (and, for a `.gltf`, its external `.bin` +
 image files — resolved against the document URL via the URL polyfill) when they aren't on
 disk, caching them into `assets/` so later runs are offline. So a scene referencing
-`https://…/Foo.gltf` just works without pre-placing the files. Enabling the polyfills pulls
-the full JsRuntimeHost root (vs only its `napi` target); the default build is unchanged. See
+`https://…/Foo.gltf` just works without pre-placing the files. See
 `../.ai/phase12-polyfills-http.md`.
+
+To build a minimal `napi`-only binary without the HTTP stack (e.g. for size experiments),
+turn them off — this also restores the lean JsRuntimeHost `napi`-target-only fetch:
+
+```powershell
+cmake -S . -B build-min -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel `
+      -DMINIMIZE_SIZE=ON -DBL_POLYFILL_URL=OFF -DBL_POLYFILL_XMLHTTPREQUEST=OFF
+cmake --build build-min --target app
+```
 
 ## Run
 
@@ -141,18 +144,20 @@ are staged next to the exe. When deploying, ship `app.exe` together with its
 
 ## Size-optimized build
 
-For the smallest `.exe`, configure a separate build dir with link-time optimization
-and a D3D11-only bgfx:
+The default build now includes the HTTP polyfills (URL + XMLHttpRequest → UrlLib). For the
+smallest possible `.exe`, configure a separate build dir that turns those off and enables
+link-time optimization + a D3D11-only bgfx:
 
 ```powershell
-cmake -S . -B build-min -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DMINIMIZE_SIZE=ON
+cmake -S . -B build-min -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DMINIMIZE_SIZE=ON `
+      -DBL_POLYFILL_URL=OFF -DBL_POLYFILL_XMLHTTPREQUEST=OFF
 cmake --build build-min --target app
 ```
 
 Compiled shaders are emitted as standalone `.bin` files rather than embedded C arrays,
 so the shader bytecode lives outside the binary.
 
-### `app.exe` size by JS engine (Release / size-opt)
+### `app.exe` size by JS engine (napi-only, no polyfills)
 
 | JS engine | Release | MinSizeRel + `MINIMIZE_SIZE` |
 |---|---|---|
@@ -160,7 +165,9 @@ so the shader bytecode lives outside the binary.
 | **Chakra (in-box, Node-API)** | **0.80 MB** | **0.67 MB** |
 
 Chakra nearly halves the binary because the engine is the OS-provided DLL instead of
-~0.7 MB of statically-linked engine code. See `../.ai/phase6-napi-engine-abstraction.md`.
+~0.7 MB of statically-linked engine code. The default polyfill build adds the URL +
+XMLHttpRequest/UrlLib static libs (~+0.3 MB, still no extra DLLs — HTTP is in-box Win32).
+See `../.ai/phase6-napi-engine-abstraction.md` and `../.ai/phase12-polyfills-http.md`.
 
 ## Status
 
@@ -218,6 +225,10 @@ Chakra nearly halves the binary because the engine is the OS-provided DLL instea
   `JsRuntime` + dispatcher and `loadGltf`/`loadEnvironment` **download remote assets over
   HTTP** (URL-resolved, cached locally) so test assets needn't be on disk. ✅
   See `../.ai/phase12-polyfills-http.md`.
+- **Phase 13** — **Littlest Tokyo demo + single build**: the animated diorama
+  (`js/demo-littlest-tokyo.js`, 71 meshes, skin + node animation, PBR/IBL, PNG+JPEG)
+  renders natively; the polyfills are now **on by default** so there's one standard build
+  (the old size-opt `build-min` is opt-in via flags). ✅
 
 ## Environment maps / IBL (Phase 10)
 
@@ -285,6 +296,28 @@ foreach ($f in @("Alien.gltf","Alien.bin","Alien_baseColor.png","Alien_occlusion
 
 The loader now also loads **external** glTF image files (`image.uri`), not just
 GLB-embedded textures, so the Alien's separate PNG maps render.
+
+## Demos
+
+`js/demo-*.js` are showcase scenes (vs the `js/tests/` parity scenes). **Littlest Tokyo** —
+Glen Fox's animated diorama (71 meshes, skinned + node animation, PBR + IBL, PNG/JPEG
+textures) — exercises most of the engine at once:
+
+```powershell
+build/bin/app.exe --prelude js/lite/index.js --script js/demo-littlest-tokyo.js --show-fps
+```
+
+The model is large (~10 MB) and lives in the Babylon-Lite repo (no public CDN URL), so copy
+it into `assets/` once (it's git-ignored like the other GLBs):
+
+```powershell
+Copy-Item ..\Babylon-Lite\lab\public\bundle\demos\littlest-tokyo\LittlestTokyo.glb assets\
+```
+
+It's a native adaptation of `lab/lite/src/demos/littlest-tokyo.ts` — the browser-only bits
+(progress UI, the visible HDR skybox, DDS env → uses the local `environmentSpecular.env`
+for IBL) are omitted. (For models that *do* have a working URL, the HTTP polyfills download
+them automatically on first run — no manual copy needed.)
 
 ## Perf benchmark (Phase 8)
 

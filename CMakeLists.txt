@@ -74,14 +74,16 @@ endif()
 #   -DJS_ENGINE=Chakra  (Windows in-box engine, linked via chakrart.lib → Chakra.dll)
 #
 # Optional browser-like polyfills (JsRuntimeHost), each a separate static library
-# toggled at configure time — the same model Babylon Native uses:
+# toggled at configure time — the same model Babylon Native uses. Both default ON so
+# the standard build can download remote assets over HTTP (turn OFF for a minimal
+# napi-only build, e.g. size experiments):
 #   -DBL_POLYFILL_URL=ON             URL / URLSearchParams
 #   -DBL_POLYFILL_XMLHTTPREQUEST=ON  XMLHttpRequest (HTTP; pulls UrlLib + arcana)
 # When any polyfill is enabled we pull the full JsRuntimeHost root (so JsRuntime +
 # the polyfills build); otherwise we pull ONLY its `napi` target to stay minimal.
 # ---------------------------------------------------------------------------
-option(BL_POLYFILL_URL "Include the JsRuntimeHost URL/URLSearchParams polyfill" OFF)
-option(BL_POLYFILL_XMLHTTPREQUEST "Include the JsRuntimeHost XMLHttpRequest polyfill (HTTP downloads; pulls UrlLib)" OFF)
+option(BL_POLYFILL_URL "Include the JsRuntimeHost URL/URLSearchParams polyfill" ON)
+option(BL_POLYFILL_XMLHTTPREQUEST "Include the JsRuntimeHost XMLHttpRequest polyfill (HTTP downloads; pulls UrlLib)" ON)
 
 set(JS_ENGINE "Chakra" CACHE STRING "JavaScript engine for the Node-API host (Chakra)")
 set(NAPI_JAVASCRIPT_ENGINE "${JS_ENGINE}" CACHE STRING "" FORCE)
