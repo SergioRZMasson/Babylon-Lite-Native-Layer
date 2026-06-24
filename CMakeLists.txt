@@ -120,6 +120,7 @@ compile_shader_bin(vertex   vs_cube.sc varying.def.sc     vs_cube.bin)
 compile_shader_bin(fragment fs_cube.sc varying.def.sc     fs_cube.bin)
 compile_shader_bin(vertex   vs_pbr.sc  varying_pbr.def.sc vs_pbr.bin)
 compile_shader_bin(fragment fs_pbr.sc  varying_pbr.def.sc fs_pbr.bin)
+compile_shader_bin(vertex   vs_skinned.sc varying_skinned.def.sc vs_skinned.bin)
 add_custom_target(shaders ALL DEPENDS ${SHADER_BINS})
 
 # ---------------------------------------------------------------------------
@@ -132,12 +133,14 @@ add_executable(app
     src/gfx.cpp
     src/scene.cpp
     src/lite.cpp
+    src/bench.cpp
     src/third_party/impl.cpp)
 add_dependencies(app shaders)
 
 target_include_directories(app PRIVATE src src/js src/third_party)
 target_link_libraries(app PRIVATE bgfx bx bimg napi)
-target_compile_definitions(app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+    BL_JS_ENGINE="${JS_ENGINE}")
 
 set_target_properties(app PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

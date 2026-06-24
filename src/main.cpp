@@ -14,6 +14,9 @@
 //   --cpu js|native   where per-frame CPU work runs (default native); exposed to JS
 //   --grid N          stress-scene grid dimension (exposed to JS as appGridSize())
 //   --bench           print a BENCH frame-time line on exit (implied by --frames)
+//   --no-vsync        present immediate (drop BGFX_RESET_VSYNC) for pure throughput
+//   --scene-name NAME label used in the BENCH line (scene=<NAME>)
+//   --show-fps        live on-screen FPS overlay (on by default in windowed mode)
 
 #include "native_window.h"
 
@@ -26,6 +29,7 @@
 #include "gfx.h"
 #include "scene.h"
 #include "lite.h"
+#include "bench.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -65,8 +69,11 @@ struct Args {
     int height = 0;
     bool warp = false;
     bool bench = false;
+    bool noVsync = false;  // present-immediate / drop BGFX_RESET_VSYNC (pure throughput)
+    bool showFps = false;  // live on-screen FPS overlay (default on in windowed mode)
     int grid = 0;          // 0 = let the script choose
     std::string cpu = "native";
+    std::string sceneName = "scene"; // BENCH scene=<label>
     std::string screenshotPath;
     std::string scriptPath;
     std::string preludePath;
@@ -87,6 +94,13 @@ Args parseArgs(int argc, char** argv) {
             a.warp = true;
         } else if (s == "--bench") {
             a.bench = true;
+        } else if (s == "--no-vsync") {
+            a.noVsync = true;
+            a.bench = true;
+        } else if (s == "--show-fps") {
+            a.showFps = true;
+        } else if (s == "--scene-name" && i + 1 < argc) {
+            a.sceneName = argv[++i];
         } else if (s == "--cpu" && i + 1 < argc) {
             a.cpu = argv[++i];
         } else if (s == "--grid" && i + 1 < argc) {
@@ -154,33 +168,6 @@ struct BgfxCallback : public bgfx::CallbackI {
     void captureBegin(uint32_t, uint32_t, uint32_t, bgfx::TextureFormat::Enum, bool) override {}
     void captureEnd() override {}
     void captureFrame(const void*, uint32_t) override {}
-};
-
-// Per-frame wall-time collector for the BENCH line (first frame dropped as warmup).
-struct FrameTimer {
-    using clock = std::chrono::steady_clock;
-    clock::time_point t0;
-    std::vector<double> ms;
-    void reserve(size_t n) { ms.reserve(n); }
-    void startFrame() { t0 = clock::now(); }
-    void endFrame() {
-        const double d = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
-        ms.push_back(d);
-    }
-    void printBench(const char* scene, const char* cpu, int nodes, int visible, double cpuAvgMs) {
-        if (ms.size() <= 1) {
-            return;
-        }
-        std::vector<double> s(ms.begin() + 1, ms.end()); // drop warmup
-        std::sort(s.begin(), s.end());
-        double sum = 0;
-        for (double v : s) { sum += v; }
-        const double avg = sum / s.size();
-        const double p95 = s[size_t(0.95 * (s.size() - 1))];
-        std::fprintf(stderr,
-            "BENCH scene=%s cpu=%s nodes=%d visible=%d frames=%zu wall_ms=%.1f min_ms=%.3f avg_ms=%.3f max_ms=%.3f p95_ms=%.3f cpu_traverse_ms=%.4f fps=%.1f\n",
-            scene, cpu, nodes, visible, s.size(), sum, s.front(), avg, s.back(), p95, cpuAvgMs, 1000.0 / avg);
-    }
 };
 
 } // namespace
@@ -328,8 +315,19 @@ int main(int argc, char** argv) {
     bool screenshotRequested = false;
     int screenshotFrame = cli.frames > 0 ? (cli.frames - 2) : -1; // capture near the end
 
-    FrameTimer timer;
+    bench::FrameTimer timer;
     if (cli.frames > 0) { timer.reserve(size_t(cli.frames)); }
+
+    // Live FPS overlay: shown on-screen (bgfx debug text) + printed to the console once
+    // per second. On by default in windowed mode (no --frames); force with --show-fps.
+    const bool liveFps = cli.showFps || cli.frames == 0;
+    if (liveFps) { bgfx::setDebug(BGFX_DEBUG_TEXT); }
+    const char* rendererName = bgfx::getRendererName(bgfx::getRendererType());
+    double wallPrevMs = bench::monotonicMillis();
+    double accMs = 0.0;          // wall time accumulated since last FPS refresh
+    int    accFrames = 0;        // frames since last refresh
+    double shownFps = 0.0, shownMsPerFrame = 0.0;
+    double sinceConsoleMs = 0.0; // throttle the console print to ~1 Hz
 
     while (window.pumpEvents()) {
         if (resized) {
@@ -337,6 +335,19 @@ int main(int argc, char** argv) {
             resized = false;
         }
         timer.startFrame();
+
+        // Wall-clock frame delta (full loop incl. present/vsync) for the live FPS readout.
+        const double wallNowMs = bench::monotonicMillis();
+        const double wallDtMs = wallNowMs - wallPrevMs;
+        wallPrevMs = wallNowMs;
+        if (liveFps) {
+            accMs += wallDtMs; ++accFrames; sinceConsoleMs += wallDtMs;
+            if (accMs >= 250.0) { // refresh the smoothed readout ~4x/sec
+                shownMsPerFrame = accMs / accFrames;
+                shownFps = 1000.0 / shownMsPerFrame;
+                accMs = 0.0; accFrames = 0;
+            }
+        }
 
         // Deterministic fixed timestep so the JS and native paths animate identically
         // (fair comparison + identical rendering for parity).
@@ -369,6 +380,23 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[main] screenshot requested at frame %d\n", frameNo);
         }
 
+        if (liveFps) {
+            const bool vsyncOn = (resetFlags & BGFX_RESET_VSYNC) != 0;
+            bgfx::dbgTextClear();
+            bgfx::dbgTextPrintf(1, 1, 0x0f, "%s  |  %s  |  %s",
+                                cli.sceneName.c_str(), BL_JS_ENGINE, rendererName);
+            bgfx::dbgTextPrintf(1, 2, 0x0b, "%6.1f FPS   %6.3f ms/frame   drawn=%d",
+                                shownFps, shownMsPerFrame, lite.lastDrawn());
+            if (vsyncOn) {
+                bgfx::dbgTextPrintf(1, 3, 0x08, "vsync ON (capped) - add --no-vsync to see uncapped throughput");
+            }
+            if (sinceConsoleMs >= 1000.0 && shownFps > 0.0) {
+                std::fprintf(stderr, "[fps] %.1f FPS  %.3f ms/frame  drawn=%d%s\n",
+                             shownFps, shownMsPerFrame, lite.lastDrawn(), vsyncOn ? "  (vsync on)" : "");
+                sinceConsoleMs = 0.0;
+            }
+        }
+
         bgfx::frame();
         timer.endFrame();
         ++frameNo;
@@ -381,16 +409,15 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr, "[main] shutting down (rendered %d frames, visible=%d)\n", frameNo, world.lastVisible());
     if (cli.bench) {
-        // Average per-frame CPU scene-traversal time (drop warmup frame).
-        double cpuAvg = 0.0;
-        if (cpuMs.size() > 1) {
-            double sum = 0;
-            for (size_t i = 1; i < cpuMs.size(); ++i) { sum += cpuMs[i]; }
-            cpuAvg = sum / double(cpuMs.size() - 1);
-        }
-        const int nodes = nativeScene ? world.nodeCount() : jsNodeCount;
-        const int vis = nativeScene ? world.lastVisible() : jsVisible;
-        timer.printBench("stress", cli.cpu.c_str(), nodes, vis, cpuAvg);
+        // BENCH line (stdout) in the DawnTest sample's format so Cedric's runner — and
+        // ours — parse our numbers identically. `extra` carries our engine/gfx labels +
+        // a convenience fps (the runner also derives fps = 1000/avg_ms).
+        const bench::FrameStats fs = timer.finish();
+        char extra[160];
+        std::snprintf(extra, sizeof(extra), "engine=%s gfx=%s drawn=%d fps=%.1f",
+                      BL_JS_ENGINE, bgfx::getRendererName(bgfx::getRendererType()),
+                      lite.lastDrawn(), fs.avgMs > 0 ? 1000.0 / fs.avgMs : 0.0);
+        timer.printBenchLine(cli.sceneName, extra);
     }
     host.shutdown();
     renderer.shutdown();

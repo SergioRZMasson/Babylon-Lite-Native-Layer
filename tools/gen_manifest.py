@@ -24,9 +24,10 @@ SUPPORTED = {
     "createFreeCamera", "createHemisphericLight", "createDirectionalLight", "createPointLight",
     "createSpotLight", "createBox", "createSphere", "createGround", "createPlane",
     "createStandardMaterial", "createPbrMaterial", "createSolidTexture2D",
-    "loadGltf", "loadEnvironment", "loadSkybox", "setFog", "setThinInstances", "setThinInstanceColors",
+    "loadGltf", "loadEnvironment", "loadHdrEnvironment", "loadSkybox", "setFog", "setThinInstances", "setThinInstanceColors",
     "addToScene", "removeFromScene", "registerScene", "startEngine", "stopEngine", "attachControl",
-    "onBeforeRender", "createTransformNode", "setParent", "mat4Compose",
+    "onBeforeRender", "createTransformNode", "setParent", "mat4Compose", "createTorus",
+    "playAnimation", "pauseAnimation", "stopAnimation", "goToFrame", "addAnimationGroups",
 }
 # Type-only / harness symbols that are erased in JS (don't gate support).
 TYPE_ONLY = {

@@ -101,6 +101,44 @@ Geom makeGround(float width, float depth) {
     return g;
 }
 
+// Torus in the XZ plane (Babylon's createTorus orientation). `diameter` is the outer
+// ring diameter, `thickness` the tube diameter, `tessellation` the segment count for
+// both the ring and the tube. Outward normals; winding matches the other primitives.
+Geom makeTorus(float diameter, float thickness, int tessellation) {
+    if (tessellation < 3) { tessellation = 3; }
+    const float R = (diameter - thickness) * 0.5f; // ring radius (center of tube)
+    const float r = thickness * 0.5f;              // tube radius
+    Geom g;
+    const int N = tessellation;
+    for (int i = 0; i <= N; ++i) {
+        const float u = 2.0f * kPi * float(i) / float(N); // around the ring
+        const float cu = std::cos(u), su = std::sin(u);
+        for (int j = 0; j <= N; ++j) {
+            const float v = 2.0f * kPi * float(j) / float(N); // around the tube
+            const float cv = std::cos(v), sv = std::sin(v);
+            // Center of the tube ring in XZ; tube sweeps in Y and radially.
+            const float px = (R + r * cv) * cu;
+            const float pz = (R + r * cv) * su;
+            const float py = r * sv;
+            const float nx = cv * cu, nz = cv * su, ny = sv;
+            g.pos.insert(g.pos.end(), { px, py, pz });
+            g.nrm.insert(g.nrm.end(), { nx, ny, nz });
+        }
+    }
+    const int stride = N + 1;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            const uint16_t a = uint16_t(i * stride + j);
+            const uint16_t b = uint16_t((i + 1) * stride + j);
+            const uint16_t c = uint16_t((i + 1) * stride + j + 1);
+            const uint16_t d = uint16_t(i * stride + j + 1);
+            g.idx.insert(g.idx.end(), { a, d, c, a, c, b });
+        }
+    }
+    g.radius = R + r;
+    return g;
+}
+
 } // namespace
 
 void Engine::computeWorld(int meshId) {
@@ -121,11 +159,109 @@ void Engine::computeWorld(int meshId) {
     m.worldDone = true;
 }
 
-int Engine::renderFrame(float /*timeSec*/) {
+// Babylon RH→LH root conversion: diag(-1,1,1) (negate X), applied to root node locals.
+static const float kRhToLh[16] = { -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+void Engine::computeNodeWorld(int idx) {
+    if (idx < 0 || idx >= int(nodes_.size())) { return; }
+    Node& n = nodes_[size_t(idx)];
+    if (n.worldDone) { return; }
+    float local[16];
+    mathx::composeTRSQuat(local, n.t, n.r, n.s);
+    if (n.parent >= 0 && n.parent < int(nodes_.size())) {
+        computeNodeWorld(n.parent);
+        mathx::mul(n.world, nodes_[size_t(n.parent)].world, local);
+    } else {
+        mathx::mul(n.world, kRhToLh, local); // root applies the RH→LH conversion
+    }
+    n.worldDone = true;
+}
+
+// Sample one channel at `time` into out[] (3 for T/S, 4 for R). Mirrors Babylon's
+// keyframe evaluation: binary-search the segment, LINEAR (SLERP for quaternions),
+// STEP, or CUBICSPLINE (Hermite, tangents scaled by dt, quaternion re-normalized).
+void Engine::sampleChannel(const AnimClip& clip, const AnimChannel& ch, float time, float* out) {
+    const AnimSampler& s = clip.samplers[size_t(ch.sampler)];
+    const int comp = s.comp;
+    const int nk = int(s.input.size());
+    const bool cubic = (s.interp == 2);
+    const int stride = cubic ? comp * 3 : comp;
+    const int valOff = cubic ? comp : 0;
+    auto key = [&](int i) -> const float* { return &s.output[size_t(i * stride + valOff)]; };
+
+    if (nk == 0) { for (int c = 0; c < comp; ++c) { out[c] = (ch.path == 1 && c == 3) ? 1.0f : 0.0f; } return; }
+    if (time <= s.input[0]) { for (int c = 0; c < comp; ++c) { out[c] = key(0)[c]; } return; }
+    if (time >= s.input[size_t(nk - 1)]) { for (int c = 0; c < comp; ++c) { out[c] = key(nk - 1)[c]; } return; }
+
+    int lo = 0, hi = nk - 1;            // binary search: last key with input <= time
+    while (hi - lo > 1) { const int mid = (lo + hi) >> 1; if (s.input[size_t(mid)] <= time) { lo = mid; } else { hi = mid; } }
+    const float t0 = s.input[size_t(lo)], t1 = s.input[size_t(hi)];
+    const float dt = t1 - t0;
+    const float u = dt > 1e-9f ? (time - t0) / dt : 0.0f;
+
+    if (s.interp == 1) { // STEP
+        for (int c = 0; c < comp; ++c) { out[c] = key(lo)[c]; }
+    } else if (cubic) {  // CUBICSPLINE Hermite
+        const float* in1 = &s.output[size_t(hi * stride)];            // inTangent of key hi
+        const float* out0 = &s.output[size_t(lo * stride + comp * 2)]; // outTangent of key lo
+        const float u2 = u * u, u3 = u2 * u;
+        const float h00 = 2 * u3 - 3 * u2 + 1, h10 = u3 - 2 * u2 + u, h01 = -2 * u3 + 3 * u2, h11 = u3 - u2;
+        for (int c = 0; c < comp; ++c) {
+            out[c] = h00 * key(lo)[c] + h10 * dt * out0[c] + h01 * key(hi)[c] + h11 * dt * in1[c];
+        }
+        if (ch.path == 1) { // normalize quaternion
+            float n = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]);
+            if (n > 1e-9f) { for (int c = 0; c < 4; ++c) { out[c] /= n; } }
+        }
+    } else {             // LINEAR (SLERP for rotation)
+        if (ch.path == 1) {
+            mathx::quatSlerp(out, key(lo), key(hi), u);
+        } else {
+            for (int c = 0; c < comp; ++c) { out[c] = key(lo)[c] + (key(hi)[c] - key(lo)[c]) * u; }
+        }
+    }
+}
+
+void Engine::updateAnimations(float dt) {
+    for (AnimClip& clip : anims_) {
+        if (!clip.playing) { continue; }
+        clip.time += dt * clip.speed;
+        if (clip.duration > 0.0f) {
+            if (clip.loop) {
+                clip.time = std::fmod(clip.time, clip.duration);
+                if (clip.time < 0.0f) { clip.time += clip.duration; }
+            } else if (clip.time > clip.duration) {
+                clip.time = clip.duration;
+            }
+        }
+        for (const AnimChannel& ch : clip.channels) {
+            if (ch.node < 0 || ch.node >= int(nodes_.size()) || ch.sampler < 0) { continue; }
+            float v[4] = { 0, 0, 0, 1 };
+            sampleChannel(clip, ch, clip.time, v);
+            Node& n = nodes_[size_t(ch.node)];
+            switch (ch.path) {
+                case 0: n.t[0] = v[0]; n.t[1] = v[1]; n.t[2] = v[2]; break;            // translation
+                case 1: n.r[0] = v[0]; n.r[1] = v[1]; n.r[2] = v[2]; n.r[3] = v[3]; break; // rotation
+                case 2: n.s[0] = v[0]; n.s[1] = v[1]; n.s[2] = v[2]; break;            // scale
+                default: break;                                                       // weights: TODO
+            }
+        }
+    }
+}
+
+int Engine::renderFrame(float timeSec) {
     lastDrawn_ = 0;
     if (activeScene_ < 0 || !gfx_) { return 0; }
     Scene& scene = scenes_[size_t(activeScene_)];
     if (scene.cameraId < 0) { return 0; }
+
+    // --- animation: advance active clips, then recompose node world matrices ---
+    float dt = (lastTimeSec_ < 0.0f) ? (1.0f / 60.0f) : (timeSec - lastTimeSec_);
+    lastTimeSec_ = timeSec;
+    if (dt < 0.0f) { dt = 0.0f; } else if (dt > 0.1f) { dt = 0.1f; }
+    updateAnimations(dt);
+    for (Node& n : nodes_) { n.worldDone = false; }
+    for (size_t i = 0; i < nodes_.size(); ++i) { computeNodeWorld(int(i)); }
 
     // --- camera: arc-rotate -> eye, then hand to gfx (view/proj + cull source) ---
     const Camera& cam = cameras_[size_t(scene.cameraId)];
@@ -161,11 +297,46 @@ int Engine::renderFrame(float /*timeSec*/) {
 
     int draws = 0;
     for (int meshId : scene.meshIds) {
-        computeWorld(meshId);
         Mesh& m = meshes_[size_t(meshId)];
+        // Animated meshes follow their bound node's world; others use the mesh hierarchy.
+        if (m.node >= 0 && m.node < int(nodes_.size())) {
+            std::memcpy(m.world, nodes_[size_t(m.node)].world, sizeof(m.world));
+            m.worldDone = true;
+        } else {
+            computeWorld(meshId);
+        }
         if (m.geomId < 0) { continue; }
 
         const Material& mat = (m.materialId >= 0) ? materials_[size_t(m.materialId)] : Material{};
+
+        // Skinned PBR mesh (skeleton): compute the bone palette natively each frame
+        // (boneMatrix = invMeshWorld · jointWorld · IBM) and draw via GPU skinning.
+        if (m.skin >= 0 && m.skin < int(skins_.size())) {
+            const Skin& sk = skins_[size_t(m.skin)];
+            const int bones = int(sk.joints.size());
+            if (bones > 0 && int(sk.ibm.size()) >= bones * 16) {
+                float invMesh[16];
+                mathx::invert(invMesh, m.world);
+                bonePalette_.resize(size_t(bones) * 16);
+                for (int j = 0; j < bones; ++j) {
+                    const int jn = sk.joints[size_t(j)];
+                    float jw[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+                    if (jn >= 0 && jn < int(nodes_.size())) { std::memcpy(jw, nodes_[size_t(jn)].world, sizeof(jw)); }
+                    float tmp[16], pal[16];
+                    mathx::mul(tmp, jw, &sk.ibm[size_t(j) * 16]);  // jointWorld · IBM
+                    mathx::mul(pal, invMesh, tmp);                  // invMeshWorld · jointWorld · IBM
+                    std::memcpy(&bonePalette_[size_t(j) * 16], pal, sizeof(pal));
+                }
+                gfx::PbrDraw pd;
+                pd.baseColor[0] = mat.diffuse[0]; pd.baseColor[1] = mat.diffuse[1]; pd.baseColor[2] = mat.diffuse[2]; pd.baseColor[3] = mat.alpha;
+                pd.metallic = mat.metallic; pd.roughness = mat.roughness; pd.occlusionStrength = mat.occlusionStrength; pd.alphaCutoff = mat.alphaCutoff;
+                pd.emissive[0] = mat.emissive[0]; pd.emissive[1] = mat.emissive[1]; pd.emissive[2] = mat.emissive[2];
+                pd.texBase = mat.texBase; pd.texMR = mat.texMR; pd.texNormal = mat.texNormal; pd.texEmissive = mat.texEmissive; pd.texOcclusion = mat.texOcclusion;
+                gfx_->drawMeshSkinnedPBR(m.geomId, m.world, bonePalette_.data(), bones, pd);
+                ++draws;
+            }
+            continue;
+        }
 
         // PBR meshes (glTF) are baked into world space; draw directly via the PBR program.
         if (m.pbr) {
@@ -309,6 +480,10 @@ void Engine::registerOn(js::Host& host) {
     host.registerFunction("__bl_createGround", [this, addMesh](const Napi::CallbackInfo& info) -> Napi::Value {
         return Napi::Number::New(info.Env(), addMesh(makeGround(float(argf(info, 0, 1)), float(argf(info, 1, 1)))));
     });
+    host.registerFunction("__bl_createTorus", [this, addMesh](const Napi::CallbackInfo& info) -> Napi::Value {
+        return Napi::Number::New(info.Env(), addMesh(makeTorus(
+            float(argf(info, 0, 1)), float(argf(info, 1, 0.5)), int(argf(info, 2, 16)))));
+    });
 
     // --- material ---
     host.registerFunction("__bl_createStandardMaterial", [this](const Napi::CallbackInfo& info) -> Napi::Value {
@@ -451,15 +626,149 @@ void Engine::registerOn(js::Host& host) {
         return Napi::Number::New(env, int(meshes_.size() - 1));
     });
 
-    host.registerFunction("__bl_setMeshMatrix", [this](const Napi::CallbackInfo& info) -> Napi::Value {
-        const int id = int(argf(info, 0, -1));
-        if (id < 0 || id >= int(meshes_.size()) || info.Length() < 2) { return info.Env().Undefined(); }
-        size_t bytes = 0;
-        const uint8_t* mb = js::argBytes(info, 1, &bytes);
-        if (mb && bytes >= 16 * sizeof(float)) {
-            std::memcpy(meshes_[size_t(id)].baseMatrix, mb, 16 * sizeof(float));
-            meshes_[size_t(id)].hasBaseMatrix = true;
+    // Skinned PBR mesh: (pos, nrm, uv, tan, joints Uint32, weights Float32, idx Uint32).
+    host.registerFunction("__bl_createMeshSkinnedPBR", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        Napi::Env env = info.Env();
+        if (!gfx_ || info.Length() < 7) { return Napi::Number::New(env, -1); }
+        size_t pl = 0, nl = 0, ul = 0, tl = 0, jl = 0, wl = 0, il = 0;
+        const uint8_t* pos = js::argBytes(info, 0, &pl);
+        const uint8_t* nrm = js::argBytes(info, 1, &nl);
+        const uint8_t* uv = js::argBytes(info, 2, &ul);
+        const uint8_t* tan = js::argBytes(info, 3, &tl);
+        const uint8_t* joints = js::argBytes(info, 4, &jl);
+        const uint8_t* weights = js::argBytes(info, 5, &wl);
+        const uint8_t* idx = js::argBytes(info, 6, &il);
+        if (!pos || !nrm || !idx || !joints || !weights) { return Napi::Number::New(env, -1); }
+        const int gid = gfx_->createMeshSkinnedPBR(
+            reinterpret_cast<const float*>(pos), uint32_t(pl / 4),
+            reinterpret_cast<const float*>(nrm), uint32_t(nl / 4),
+            reinterpret_cast<const float*>(uv), uint32_t(ul / 4),
+            reinterpret_cast<const float*>(tan), uint32_t(tl / 4),
+            reinterpret_cast<const uint32_t*>(joints), reinterpret_cast<const float*>(weights),
+            idx, uint32_t(il / 4), /*index32=*/true);
+        Mesh m;
+        m.pbr = true;
+        m.geomId = gid;
+        meshes_.push_back(m);
+        return Napi::Number::New(env, int(meshes_.size() - 1));
+    });
+
+    // Create a skin: (joints Uint32 node indices, inverseBindMatrices Float32 16*count).
+    host.registerFunction("__bl_createSkin", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        size_t jl = 0, il = 0;
+        const uint8_t* j = js::argBytes(info, 0, &jl);
+        const uint8_t* ibm = js::argBytes(info, 1, &il);
+        Skin sk;
+        if (j && jl) {
+            const uint32_t* jp = reinterpret_cast<const uint32_t*>(j);
+            sk.joints.assign(jp, jp + jl / 4);
         }
+        if (ibm && il) {
+            const float* ip = reinterpret_cast<const float*>(ibm);
+            sk.ibm.assign(ip, ip + il / 4);
+        }
+        skins_.push_back(std::move(sk));
+        return Napi::Number::New(info.Env(), int(skins_.size() - 1));
+    });
+    // Bind a skin to a mesh.
+    host.registerFunction("__bl_setMeshSkin", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int id = int(argf(info, 0, -1));
+        const int skin = int(argf(info, 1, -1));
+        if (id >= 0 && id < int(meshes_.size())) { meshes_[size_t(id)].skin = skin; }
+        return info.Env().Undefined();
+    });
+
+    // ---- animation node graph + clips (orchestrated natively per Phase 9) ----
+    // Number of native nodes so far (the base offset for the next glTF load's node indices).
+    host.registerFunction("__bl_nodeCount", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        return Napi::Number::New(info.Env(), int(nodes_.size()));
+    });
+    // Create a scene-graph node with rest-pose TRS (quaternion). Returns its index;
+    // JS creates nodes in glTF node order so channels/skins can reference by index.
+    host.registerFunction("__bl_createNode", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        Node n;
+        n.parent = int(argf(info, 0, -1));
+        n.t[0] = float(argf(info, 1, 0)); n.t[1] = float(argf(info, 2, 0)); n.t[2] = float(argf(info, 3, 0));
+        n.r[0] = float(argf(info, 4, 0)); n.r[1] = float(argf(info, 5, 0)); n.r[2] = float(argf(info, 6, 0)); n.r[3] = float(argf(info, 7, 1));
+        n.s[0] = float(argf(info, 8, 1)); n.s[1] = float(argf(info, 9, 1)); n.s[2] = float(argf(info, 10, 1));
+        nodes_.push_back(n);
+        return Napi::Number::New(info.Env(), int(nodes_.size() - 1));
+    });
+    // Bind a mesh to a node so its world matrix follows that node each frame.
+    host.registerFunction("__bl_setMeshNode", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int id = int(argf(info, 0, -1));
+        const int node = int(argf(info, 1, -1));
+        if (id >= 0 && id < int(meshes_.size())) { meshes_[size_t(id)].node = node; }
+        return info.Env().Undefined();
+    });
+    // Create an animation clip (AnimationGroup). Returns its index.
+    host.registerFunction("__bl_createAnimation", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        AnimClip clip;
+        clip.name = js::argStr(info, 0);
+        clip.fps = float(argf(info, 1, 60));
+        anims_.push_back(std::move(clip));
+        return Napi::Number::New(info.Env(), int(anims_.size() - 1));
+    });
+    // Add a sampler to a clip: (animId, inputTimes Float32, outputValues Float32, comp, interp).
+    // Returns the sampler index within the clip. Updates the clip duration from the last key.
+    host.registerFunction("__bl_addAnimSampler", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int aid = int(argf(info, 0, -1));
+        if (aid < 0 || aid >= int(anims_.size())) { return Napi::Number::New(info.Env(), -1); }
+        size_t inBytes = 0, outBytes = 0;
+        const uint8_t* in = js::argBytes(info, 1, &inBytes);
+        const uint8_t* out = js::argBytes(info, 2, &outBytes);
+        AnimSampler s;
+        s.comp = int(argf(info, 3, 3));
+        s.interp = int(argf(info, 4, 0));
+        if (in && inBytes) { s.input.assign(reinterpret_cast<const float*>(in), reinterpret_cast<const float*>(in) + inBytes / 4); }
+        if (out && outBytes) { s.output.assign(reinterpret_cast<const float*>(out), reinterpret_cast<const float*>(out) + outBytes / 4); }
+        AnimClip& clip = anims_[size_t(aid)];
+        if (!s.input.empty()) { clip.duration = std::fmax(clip.duration, s.input.back()); }
+        clip.samplers.push_back(std::move(s));
+        return Napi::Number::New(info.Env(), int(clip.samplers.size() - 1));
+    });
+    // Add a channel: (animId, targetNode, path[0=T,1=R,2=S,3=W], samplerIdx).
+    host.registerFunction("__bl_addAnimChannel", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int aid = int(argf(info, 0, -1));
+        if (aid < 0 || aid >= int(anims_.size())) { return info.Env().Undefined(); }
+        AnimChannel ch;
+        ch.node = int(argf(info, 1, -1));
+        ch.path = int(argf(info, 2, 0));
+        ch.sampler = int(argf(info, 3, -1));
+        anims_[size_t(aid)].channels.push_back(ch);
+        return info.Env().Undefined();
+    });
+    // Animation playback control: (animId, op[0=play,1=pause,2=stop,3=goToFrame], arg).
+    host.registerFunction("__bl_animControl", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int aid = int(argf(info, 0, -1));
+        if (aid < 0 || aid >= int(anims_.size())) { return info.Env().Undefined(); }
+        AnimClip& clip = anims_[size_t(aid)];
+        const int op = int(argf(info, 1, 0));
+        switch (op) {
+            case 0: clip.playing = true; break;                                   // play
+            case 1: clip.playing = false; break;                                  // pause
+            case 2: clip.playing = false; clip.time = 0.0f; break;                // stop
+            case 3: {                                                             // goToFrame
+                clip.time = float(argf(info, 2, 0)) / (clip.fps > 0 ? clip.fps : 60.0f);
+                // Apply the pose immediately (sample channels at the new time).
+                for (const AnimChannel& ch : clip.channels) {
+                    if (ch.node < 0 || ch.node >= int(nodes_.size()) || ch.sampler < 0) { continue; }
+                    float v[4] = { 0, 0, 0, 1 };
+                    sampleChannel(clip, ch, clip.time, v);
+                    Node& n = nodes_[size_t(ch.node)];
+                    if (ch.path == 0) { n.t[0] = v[0]; n.t[1] = v[1]; n.t[2] = v[2]; }
+                    else if (ch.path == 1) { n.r[0] = v[0]; n.r[1] = v[1]; n.r[2] = v[2]; n.r[3] = v[3]; }
+                    else if (ch.path == 2) { n.s[0] = v[0]; n.s[1] = v[1]; n.s[2] = v[2]; }
+                }
+                break;
+            }
+            default: break;
+        }
+        return info.Env().Undefined();
+    });
+    host.registerFunction("__bl_setAnimLoop", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int aid = int(argf(info, 0, -1));
+        if (aid >= 0 && aid < int(anims_.size())) { anims_[size_t(aid)].loop = argf(info, 1, 1) != 0.0; }
         return info.Env().Undefined();
     });
 

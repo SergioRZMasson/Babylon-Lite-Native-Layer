@@ -30,14 +30,17 @@
     }
 
     // Read an accessor into a Float32Array (honors byteStride + normalized integers).
-    function readAccessor(json, dv, binOff, accIdx) {
+    // `buffers` is an array of { dv, base } (one per glTF buffer); GLB has a single one.
+    function readAccessor(json, buffers, accIdx) {
         const acc = json.accessors[accIdx];
         const comp = TYPE_COUNT[acc.type] || 1;
         const out = new Float32Array(acc.count * comp);
         if (acc.bufferView === undefined) { return out; }
         const bv = json.bufferViews[acc.bufferView];
+        const buf = buffers[bv.buffer || 0];
+        const dv = buf.dv;
         const cs = COMP_SIZE[acc.componentType];
-        const base = binOff + (bv.byteOffset || 0) + (acc.byteOffset || 0);
+        const base = buf.base + (bv.byteOffset || 0) + (acc.byteOffset || 0);
         const stride = bv.byteStride || comp * cs;
         const norm = acc.normalized;
         for (let i = 0; i < acc.count; i++) {
@@ -60,17 +63,30 @@
         return out;
     }
 
-    function readIndices(json, dv, binOff, accIdx) {
+    // Read an integer accessor (indices or JOINTS_0) into a Uint32Array.
+    function readIntAccessor(json, buffers, accIdx) {
         const acc = json.accessors[accIdx];
-        const out = new Uint32Array(acc.count);
+        const comp = TYPE_COUNT[acc.type] || 1;
+        const out = new Uint32Array(acc.count * comp);
         const bv = json.bufferViews[acc.bufferView];
+        const buf = buffers[bv.buffer || 0];
+        const dv = buf.dv;
         const cs = COMP_SIZE[acc.componentType];
-        const base = binOff + (bv.byteOffset || 0) + (acc.byteOffset || 0);
+        const base = buf.base + (bv.byteOffset || 0) + (acc.byteOffset || 0);
+        const stride = bv.byteStride || comp * cs;
         for (let i = 0; i < acc.count; i++) {
-            const o = base + i * cs;
-            out[i] = acc.componentType === 5125 ? dv.getUint32(o, true) : (acc.componentType === 5123 ? dv.getUint16(o, true) : dv.getUint8(o));
+            const e = base + i * stride;
+            for (let c = 0; c < comp; c++) {
+                const o = e + c * cs;
+                out[i * comp + c] = acc.componentType === 5125 ? dv.getUint32(o, true)
+                    : (acc.componentType === 5123 ? dv.getUint16(o, true) : dv.getUint8(o));
+            }
         }
         return out;
+    }
+
+    function readIndices(json, buffers, accIdx) {
+        return readIntAccessor(json, buffers, accIdx);
     }
 
     function buildParentMap(json) {
@@ -100,13 +116,145 @@
         return world;
     }
 
+    // Decompose a glTF node's TRS for the native node graph. If the node uses a `matrix`,
+    // extract translation + quaternion + scale from it (glTF guarantees TRS-decomposable).
+    function nodeTRS(node) {
+        if (node.matrix) { return BL.decomposeMat4(node.matrix); }
+        return {
+            t: node.translation || [0, 0, 0],
+            r: node.rotation || [0, 0, 0, 1],
+            s: node.scale || [1, 1, 1],
+        };
+    }
+
+    // Create the full node graph natively (in glTF node order so channels/meshes can
+    // reference nodes by index). Returns the parent map (used for bounds).
+    function buildNativeNodes(json, parentMap) {
+        const nodes = json.nodes || [];
+        for (let i = 0; i < nodes.length; i++) {
+            const trs = nodeTRS(nodes[i]);
+            const p = parentMap[i] == null ? -1 : parentMap[i];
+            __bl_createNode(p, trs.t[0], trs.t[1], trs.t[2],
+                trs.r[0], trs.r[1], trs.r[2], trs.r[3], trs.s[0], trs.s[1], trs.s[2]);
+        }
+    }
+
+    // Parse glTF animations into native clips. Returns an array of AnimationGroup objects.
+    function parseAnimations(json, buffers, nodeBase) {
+        const out = [];
+        const anims = json.animations || [];
+        const INTERP = { LINEAR: 0, STEP: 1, CUBICSPLINE: 2 };
+        const PATH = { translation: 0, rotation: 1, scale: 2, weights: 3 };
+        for (let a = 0; a < anims.length; a++) {
+            const anim = anims[a];
+            const animId = __bl_createAnimation(anim.name || ("anim" + a), 60);
+            for (let si = 0; si < anim.samplers.length; si++) {
+                const samp = anim.samplers[si];
+                const input = readAccessor(json, buffers, samp.input);   // keyframe times
+                const output = readAccessor(json, buffers, samp.output); // values
+                const outAcc = json.accessors[samp.output];
+                const comp = TYPE_COUNT[outAcc.type] || 1;
+                __bl_addAnimSampler(animId, input, output, comp, INTERP[samp.interpolation] == null ? 0 : INTERP[samp.interpolation]);
+            }
+            for (let ci = 0; ci < anim.channels.length; ci++) {
+                const ch = anim.channels[ci];
+                if (ch.target.node == null) { continue; }
+                const path = PATH[ch.target.path];
+                if (path == null) { continue; }
+                __bl_addAnimChannel(animId, nodeBase + ch.target.node, path, ch.sampler);
+            }
+            out.push({ _kind: "animationGroup", _animId: animId, name: anim.name || ("anim" + a) });
+        }
+        return out;
+    }
+
+    // Build the buffers[] array: GLB embedded BIN, data-URI, or external .bin (relative
+    // to the .gltf, resolved via __bl_readFile's basename/assets fallback).
+    function loadBuffers(json, glb) {
+        const list = json.buffers || [];
+        const buffers = [];
+        for (let i = 0; i < list.length; i++) {
+            const b = list[i];
+            if (!b.uri) {
+                buffers.push({ dv: glb.dv, base: glb.binOff }); // GLB embedded BIN chunk
+            } else if (b.uri.lastIndexOf("data:", 0) === 0) {
+                const bytes = BL.base64ToBytes(b.uri.slice(b.uri.indexOf(",") + 1));
+                buffers.push({ dv: new DataView(bytes.buffer), base: 0 });
+            } else {
+                const binAb = __bl_readFile(decodeURIComponent(b.uri));
+                if (!binAb) { throw new Error("loadGltf: cannot read buffer " + b.uri); }
+                buffers.push({ dv: new DataView(binAb), base: 0 });
+            }
+        }
+        return buffers;
+    }
+
+    // Build a native skin (joints offset by nodeBase + inverse bind matrices). Cached per
+    // glTF skin index. Returns the native skin id.
+    function buildSkin(json, buffers, skinIdx, nodeBase, skinCache) {
+        if (skinCache[skinIdx] != null) { return skinCache[skinIdx]; }
+        const skin = json.skins[skinIdx];
+        const joints = new Uint32Array(skin.joints.length);
+        for (let i = 0; i < skin.joints.length; i++) { joints[i] = nodeBase + skin.joints[i]; }
+        let ibm;
+        if (skin.inverseBindMatrices != null) {
+            ibm = readAccessor(json, buffers, skin.inverseBindMatrices); // 16 * jointCount
+        } else {
+            ibm = new Float32Array(skin.joints.length * 16);
+            for (let i = 0; i < skin.joints.length; i++) { ibm[i * 16] = ibm[i * 16 + 5] = ibm[i * 16 + 10] = ibm[i * 16 + 15] = 1; }
+        }
+        const id = __bl_createSkin(joints, ibm);
+        skinCache[skinIdx] = id;
+        return id;
+    }
+
+    // Compute smooth vertex normals from positions + indices (glTF allows omitting
+    // NORMAL; Babylon generates them). Uses the original winding (pre RH→LH reversal).
+    function computeNormals(pos, idx) {
+        const n = new Float32Array(pos.length);
+        for (let i = 0; i + 2 < idx.length; i += 3) {
+            const a = idx[i] * 3, b = idx[i + 1] * 3, c = idx[i + 2] * 3;
+            const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+            const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+            const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            n[a] += nx; n[a + 1] += ny; n[a + 2] += nz;
+            n[b] += nx; n[b + 1] += ny; n[b + 2] += nz;
+            n[c] += nx; n[c + 1] += ny; n[c + 2] += nz;
+        }
+        for (let i = 0; i < n.length; i += 3) {
+            const l = Math.hypot(n[i], n[i + 1], n[i + 2]) || 1;
+            n[i] /= l; n[i + 1] /= l; n[i + 2] /= l;
+        }
+        return n;
+    }
+
     BL.loadGltf = function (engine, url) {
-        const ab = __bl_readFile(String(url));
-        if (!ab) { throw new Error("loadGltf: cannot read " + url); }
-        const { json, dv, binOff } = parseGlb(ab);
+        const u = String(url);
+        const raw = __bl_readFile(u);
+        if (!raw) { throw new Error("loadGltf: cannot read " + url); }
+        const isGltf = /\.gltf(\?|$)/i.test(u);
+        let json, glb = null;
+        if (isGltf) {
+            json = JSON.parse(BL.utf8Decode(new Uint8Array(raw)));
+        } else {
+            const p = parseGlb(raw);
+            json = p.json; glb = { dv: p.dv, binOff: p.binOff };
+        }
+        const buffers = loadBuffers(json, glb);
         const parentMap = buildParentMap(json);
         const worldCache = {};
         const texCache = {};
+        const skinCache = {};
+
+        // Native node graph (offset by the current node count so multiple loads don't clash).
+        const nodeBase = __bl_nodeCount();
+        const nodes = json.nodes || [];
+        for (let i = 0; i < nodes.length; i++) {
+            const trs = nodeTRS(nodes[i]);
+            const p = parentMap[i] == null ? -1 : (nodeBase + parentMap[i]);
+            __bl_createNode(p, trs.t[0], trs.t[1], trs.t[2],
+                trs.r[0], trs.r[1], trs.r[2], trs.r[3], trs.s[0], trs.s[1], trs.s[2]);
+        }
 
         function texFor(texIndex) {
             if (texIndex == null) { return -1; }
@@ -118,7 +266,8 @@
             let id = -1;
             if (image && image.bufferView != null) {
                 const bv = json.bufferViews[image.bufferView];
-                const bytes = new Uint8Array(ab, binOff + (bv.byteOffset || 0), bv.byteLength);
+                const buf = buffers[bv.buffer || 0];
+                const bytes = new Uint8Array(buf.dv.buffer, buf.dv.byteOffset + buf.base + (bv.byteOffset || 0), bv.byteLength);
                 id = __bl_createTextureEncoded(bytes);
             }
             texCache[imgIdx] = id;
@@ -150,34 +299,46 @@
         }
 
         const meshIds = [];
-        const nodes = json.nodes || [];
         for (let ni = 0; ni < nodes.length; ni++) {
             const node = nodes[ni];
             if (node.mesh == null) { continue; }
-            const world = nodeWorld(json, ni, parentMap, worldCache);
+            const world = nodeWorld(json, ni, parentMap, worldCache); // for bounds (rest pose)
             const mesh = json.meshes[node.mesh];
             for (let pi = 0; pi < mesh.primitives.length; pi++) {
                 const prim = mesh.primitives[pi];
                 if (prim.mode != null && prim.mode !== 4) { continue; } // triangles only
                 const attr = prim.attributes;
                 if (attr.POSITION == null) { continue; }
-                const pos = readAccessor(json, dv, binOff, attr.POSITION);
+                const pos = readAccessor(json, buffers, attr.POSITION);
                 const nVerts = pos.length / 3;
-                const nrm = attr.NORMAL != null ? readAccessor(json, dv, binOff, attr.NORMAL) : new Float32Array(nVerts * 3);
-                const uv = attr.TEXCOORD_0 != null ? readAccessor(json, dv, binOff, attr.TEXCOORD_0) : new Float32Array(nVerts * 2);
-                const tan = attr.TANGENT != null ? readAccessor(json, dv, binOff, attr.TANGENT) : new Float32Array(nVerts * 4);
+                const uv = attr.TEXCOORD_0 != null ? readAccessor(json, buffers, attr.TEXCOORD_0) : new Float32Array(nVerts * 2);
+                const tan = attr.TANGENT != null ? readAccessor(json, buffers, attr.TANGENT) : new Float32Array(nVerts * 4);
                 let idx;
                 if (prim.indices != null) {
-                    idx = readIndices(json, dv, binOff, prim.indices);
+                    idx = readIndices(json, buffers, prim.indices);
                 } else {
                     idx = new Uint32Array(nVerts);
                     for (let i = 0; i < nVerts; i++) { idx[i] = i; }
                 }
+                // Normals: read if present, else generate from geometry (uses original winding).
+                const nrm = attr.NORMAL != null ? readAccessor(json, buffers, attr.NORMAL) : computeNormals(pos, idx);
                 // Reverse winding to compensate the RH→LH mirror (keeps CULL_CCW correct).
                 for (let i = 0; i + 2 < idx.length; i += 3) { const t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t; }
 
-                const meshId = __bl_createMeshPBR(pos, nrm, uv, tan, idx);
-                __bl_setMeshMatrix(meshId, world);
+                // Skinned primitive (skeleton): build a skinned mesh + bind the skin so the
+                // native engine computes the bone palette each frame (GPU skinning).
+                const skinned = node.skin != null && attr.JOINTS_0 != null && attr.WEIGHTS_0 != null;
+                let meshId;
+                if (skinned) {
+                    const joints = readIntAccessor(json, buffers, attr.JOINTS_0);   // Uint32 vec4/vertex
+                    const wts = readAccessor(json, buffers, attr.WEIGHTS_0);        // Float32 vec4/vertex
+                    meshId = __bl_createMeshSkinnedPBR(pos, nrm, uv, tan, joints, wts, idx);
+                    const skinId = buildSkin(json, buffers, node.skin, nodeBase, skinCache);
+                    __bl_setMeshSkin(meshId, skinId);
+                } else {
+                    meshId = __bl_createMeshPBR(pos, nrm, uv, tan, idx);
+                }
+                __bl_setMeshNode(meshId, nodeBase + ni);   // mesh world follows its node
                 __bl_setMeshMaterial(meshId, buildMaterial(prim.material));
                 meshIds.push(meshId);
 
@@ -198,6 +359,10 @@
                 }
             }
         }
-        return Promise.resolve({ _kind: "container", _meshIds: meshIds });
+
+        // Animations (orchestrated natively) — channels reference glTF node indices, offset
+        // by nodeBase to match the native node graph.
+        const animationGroups = parseAnimations(json, buffers, nodeBase);
+        return Promise.resolve({ _kind: "container", _meshIds: meshIds, animationGroups: animationGroups });
     };
 })(globalThis.__BL);

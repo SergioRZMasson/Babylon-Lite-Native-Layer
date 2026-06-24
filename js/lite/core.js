@@ -45,6 +45,29 @@
     // createDefaultCamera). Mirrors how Babylon's createDefaultCamera reads scene bounds.
     BL._state = { lastSceneId: -1, bounds: null };
 
+    // Decode a base64 string to a Uint8Array (in-box Chakra has no atob). Used for glTF
+    // data-URI buffers/images.
+    BL.base64ToBytes = function (b64) {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const lut = BL._b64lut || (BL._b64lut = (function () {
+            const t = new Int16Array(256); for (let i = 0; i < 256; i++) { t[i] = -1; }
+            for (let i = 0; i < chars.length; i++) { t[chars.charCodeAt(i)] = i; }
+            return t;
+        })());
+        let len = b64.length;
+        while (len > 0 && (b64.charCodeAt(len - 1) === 61 /* = */)) { len--; }
+        const outLen = (len * 3) >> 2;
+        const out = new Uint8Array(outLen);
+        let acc = 0, bits = 0, o = 0;
+        for (let i = 0; i < len; i++) {
+            const v = lut[b64.charCodeAt(i)];
+            if (v < 0) { continue; }
+            acc = (acc << 6) | v; bits += 6;
+            if (bits >= 8) { bits -= 8; out[o++] = (acc >> bits) & 0xff; }
+        }
+        return out;
+    };
+
     BL._growBounds = function (x, y, z) {
         const s = BL._state;
         if (!s.bounds) { s.bounds = { min: [x, y, z], max: [x, y, z] }; return; }

@@ -85,4 +85,68 @@ inline bool sphereInFrustum(const float planes[6][4], float cx, float cy, float 
     return true;
 }
 
+// Compose a column-major affine from translation, quaternion (qx,qy,qz,qw), scale.
+// Matches Babylon's Matrix.Compose (used for glTF node TRS + animation sampling).
+inline void composeTRSQuat(float* m, const float* t, const float* q, const float* s) {
+    const float qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+    const float xx = qx * qx, yy = qy * qy, zz = qz * qz;
+    const float xy = qx * qy, zw = qz * qw, xz = qx * qz;
+    const float yw = qy * qw, yz = qy * qz, xw = qx * qw;
+    const float r00 = 1 - 2 * (yy + zz), r01 = 2 * (xy - zw),     r02 = 2 * (xz + yw);
+    const float r10 = 2 * (xy + zw),     r11 = 1 - 2 * (xx + zz), r12 = 2 * (yz - xw);
+    const float r20 = 2 * (xz - yw),     r21 = 2 * (yz + xw),     r22 = 1 - 2 * (xx + yy);
+    m[0] = r00 * s[0]; m[1] = r10 * s[0]; m[2] = r20 * s[0]; m[3] = 0;
+    m[4] = r01 * s[1]; m[5] = r11 * s[1]; m[6] = r21 * s[1]; m[7] = 0;
+    m[8] = r02 * s[2]; m[9] = r12 * s[2]; m[10] = r22 * s[2]; m[11] = 0;
+    m[12] = t[0]; m[13] = t[1]; m[14] = t[2]; m[15] = 1;
+}
+
+// Spherical linear interpolation of unit quaternions (Babylon Quaternion.Slerp).
+// out may alias neither a nor b. Falls back to NLERP when the quaternions are close.
+inline void quatSlerp(float* out, const float* a, const float* b, float t) {
+    float bx = b[0], by = b[1], bz = b[2], bw = b[3];
+    float cosom = a[0] * bx + a[1] * by + a[2] * bz + a[3] * bw;
+    if (cosom < 0.0f) { cosom = -cosom; bx = -bx; by = -by; bz = -bz; bw = -bw; }
+    float sa, sb;
+    if (1.0f - cosom > 1e-6f) {
+        const float omega = std::acos(cosom);
+        const float sinom = std::sin(omega);
+        sa = std::sin((1.0f - t) * omega) / sinom;
+        sb = std::sin(t * omega) / sinom;
+    } else {
+        sa = 1.0f - t; sb = t;
+    }
+    out[0] = sa * a[0] + sb * bx;
+    out[1] = sa * a[1] + sb * by;
+    out[2] = sa * a[2] + sb * bz;
+    out[3] = sa * a[3] + sb * bw;
+}
+
+// Inverse of a general column-major 4x4 (full cofactor inverse). Returns false (and
+// leaves out = identity) if the matrix is singular. Used for invMeshWorld in skinning.
+inline bool invert(float* out, const float* m) {
+    float inv[16];
+    inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+    float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (det > -1e-12f && det < 1e-12f) { identity(out); return false; }
+    det = 1.0f / det;
+    for (int i = 0; i < 16; ++i) { out[i] = inv[i] * det; }
+    return true;
+}
+
 } // namespace mathx

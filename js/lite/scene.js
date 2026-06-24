@@ -5,7 +5,7 @@
     BL.createSceneContext = function (/* engine */) {
         const id = __bl_createScene();
         BL._state.lastSceneId = id;
-        const scene = { _id: id, _kind: "scene" };
+        const scene = { _id: id, _kind: "scene", animationGroups: [] };
         let _camera = null, _clear = { r: 0.05, g: 0.06, b: 0.09, a: 1 };
         Object.defineProperty(scene, "clearColor", {
             get() { return _clear; },
@@ -24,6 +24,15 @@
             case "mesh": __bl_addMeshToScene(scene._id, entity._id); break;
             case "container":
                 for (let i = 0; i < entity._meshIds.length; i++) { __bl_addMeshToScene(scene._id, entity._meshIds[i]); }
+                // glTF animation groups: expose on the scene and auto-play (Babylon ticks
+                // loaded groups each frame; the native engine advances them in renderFrame).
+                if (entity.animationGroups && entity.animationGroups.length) {
+                    for (let i = 0; i < entity.animationGroups.length; i++) {
+                        const g = entity.animationGroups[i];
+                        scene.animationGroups.push(g);
+                        __bl_animControl(g._animId, 0 /* play */, 0);
+                    }
+                }
                 break;
             case "light": __bl_setSceneLight(scene._id, entity._id); break;
             case "camera": __bl_setSceneCamera(scene._id, entity._id); break;

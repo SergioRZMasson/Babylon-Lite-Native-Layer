@@ -61,6 +61,7 @@
     __bl_require("mesh.js");
     __bl_require("material.js");
     __bl_require("texture.js");
+    __bl_require("animation.js");
     __bl_require("loaders/gltf.js");
     __bl_require("loaders/environment.js");
 
@@ -69,12 +70,14 @@
     const pub = [
         "createEngine", "createSceneContext", "createArcRotateCamera", "createDefaultCamera",
         "createHemisphericLight", "createDirectionalLight", "createPointLight", "createSpotLight",
-        "createBox", "createSphere", "createGround",
+        "createBox", "createSphere", "createGround", "createTorus",
         "createStandardMaterial", "createPbrMaterial", "createSolidTexture2D",
-        "loadGltf", "loadEnvironment", "loadSkybox", "setFog",
+        "loadGltf", "loadEnvironment", "loadHdrEnvironment", "loadSkybox", "setFog",
         "setThinInstances", "setThinInstanceColors", "addToScene", "removeFromScene",
         "registerScene", "startEngine", "stopEngine",
-        "attachControl", "onBeforeRender", "setParent", "createTransformNode", "mat4Compose",
+        "attachControl", "onBeforeRender", "setParent", "createTransformNode",
+        "playAnimation", "pauseAnimation", "stopAnimation", "goToFrame", "addAnimationGroups",
+        "mat4Compose",
     ];
     for (let i = 0; i < pub.length; i++) { if (BL[pub[i]]) { g[pub[i]] = BL[pub[i]]; } }
 

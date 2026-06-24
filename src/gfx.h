@@ -83,6 +83,18 @@ public:
                      float skyR, float skyG, float skyB, float gndR, float gndG, float gndB);
     void drawMeshPBR(int meshId, const float worldMatrix[16], const PbrDraw& mat);
 
+    // ---- Skeletal animation (GPU skinning) ----
+    // Create a skinned PBR mesh: PBR vertex data + per-vertex bone indices (4 uint32/vertex,
+    // packed to uint8 in the buffer) and weights (4 float/vertex). Returns a gfx mesh id.
+    int createMeshSkinnedPBR(const float* pos, uint32_t posCount, const float* nrm, uint32_t nrmCount,
+                             const float* uv, uint32_t uvCount, const float* tan, uint32_t tanCount,
+                             const uint32_t* joints, const float* weights,
+                             const void* indices, uint32_t indexCount, bool index32);
+    // Draw a skinned mesh with a bone palette (`boneCount` column-major mat4, world space)
+    // and mesh world matrix. Uses the skinned PBR program.
+    void drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
+                            const float* bonePalette, int boneCount, const PbrDraw& mat);
+
 private:
     struct Mesh {
         bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
@@ -101,6 +113,11 @@ private:
     // PBR pipeline.
     bgfx::ProgramHandle pbrProgram_ = BGFX_INVALID_HANDLE;
     bgfx::VertexLayout pbrLayout_;
+    // Skinned PBR pipeline (vs_skinned + fs_pbr).
+    bgfx::ProgramHandle pbrSkinnedProgram_ = BGFX_INVALID_HANDLE;
+    bgfx::VertexLayout pbrSkinnedLayout_;
+    bgfx::UniformHandle uBones_ = BGFX_INVALID_HANDLE;
+    static const int kMaxBones = 128;
     std::vector<bgfx::TextureHandle> textures_;
     bgfx::TextureHandle whiteTex_ = BGFX_INVALID_HANDLE;
     bgfx::TextureHandle flatNormalTex_ = BGFX_INVALID_HANDLE;

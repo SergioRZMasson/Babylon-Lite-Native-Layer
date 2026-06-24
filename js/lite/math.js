@@ -33,4 +33,38 @@
             m[2] * x + m[6] * y + m[10] * z + m[14],
         ];
     };
+
+    // Decompose a column-major affine 4x4 into { t:[3], r:[4]quat, s:[3] }. Mirrors
+    // Babylon Matrix.decompose: scale = column lengths (sign from determinant on X),
+    // rotation = quaternion from the scale-removed rotation basis. Used for glTF nodes
+    // that supply a `matrix` instead of TRS.
+    BL.decomposeMat4 = function (m) {
+        const t = [m[12], m[13], m[14]];
+        let sx = Math.hypot(m[0], m[1], m[2]);
+        const sy = Math.hypot(m[4], m[5], m[6]);
+        const sz = Math.hypot(m[8], m[9], m[10]);
+        // Determinant sign → flip one scale axis to keep a right-handed rotation.
+        const det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9]) + m[8] * (m[1] * m[6] - m[2] * m[5]);
+        if (det < 0) { sx = -sx; }
+        const isx = sx ? 1 / sx : 0, isy = sy ? 1 / sy : 0, isz = sz ? 1 / sz : 0;
+        const r00 = m[0] * isx, r10 = m[1] * isx, r20 = m[2] * isx;
+        const r01 = m[4] * isy, r11 = m[5] * isy, r21 = m[6] * isy;
+        const r02 = m[8] * isz, r12 = m[9] * isz, r22 = m[10] * isz;
+        const trace = r00 + r11 + r22;
+        let qx, qy, qz, qw;
+        if (trace > 0) {
+            let s = Math.sqrt(trace + 1) * 2; qw = 0.25 * s;
+            qx = (r21 - r12) / s; qy = (r02 - r20) / s; qz = (r10 - r01) / s;
+        } else if (r00 > r11 && r00 > r22) {
+            let s = Math.sqrt(1 + r00 - r11 - r22) * 2; qw = (r21 - r12) / s;
+            qx = 0.25 * s; qy = (r01 + r10) / s; qz = (r02 + r20) / s;
+        } else if (r11 > r22) {
+            let s = Math.sqrt(1 + r11 - r00 - r22) * 2; qw = (r02 - r20) / s;
+            qx = (r01 + r10) / s; qy = 0.25 * s; qz = (r12 + r21) / s;
+        } else {
+            let s = Math.sqrt(1 + r22 - r00 - r11) * 2; qw = (r10 - r01) / s;
+            qx = (r02 + r20) / s; qy = (r12 + r21) / s; qz = 0.25 * s;
+        }
+        return { t: t, r: [qx, qy, qz, qw], s: [sx, sy, sz] };
+    };
 })(globalThis.__BL);

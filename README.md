@@ -95,6 +95,12 @@ Babylon-Lite JS here avoids ES2019+ syntax (no `?.` / `??`).
 # Interactive window:
 build/bin/app.exe
 
+# Live perf scene with an on-screen FPS overlay (windowed; close the window to exit):
+build/bin/app.exe --prelude js/lite/index.js --script js/bench/scene200.js --no-vsync
+#   - omit --no-vsync to see the vsync-capped (display refresh) rate
+#   - the overlay shows FPS / ms-per-frame / draw count; FPS also prints to the console
+#   - --show-fps forces the overlay on for any scene
+
 # Headless verification (render N frames, capture a TGA near the end):
 build/bin/app.exe --frames 30 --width 480 --height 360 --screenshot out.tga
 
@@ -162,6 +168,59 @@ Chakra nearly halves the binary because the engine is the OS-provided DLL instea
   reference goldens. First feature batch (directional/point/spot lights, fog hook,
   solid textures, `onBeforeRender`, tuple colors) lands procedural scenes. ✅ See
   `../.ai/phase7-parity-framework.md`.
+- **Phase 8** — **perf benchmark tooling**: a `bench::FrameTimer` + `BENCH` line and a
+  runner matching Cedric's DawnTest methodology (scene200 workload, vsync off, warmup
+  drop, min/avg/p95/max ms + FPS), so our numbers slot into the same table as his
+  DawnTest / BabylonNative results. ✅ See `../.ai/phase8-perf-bench.md`.
+- **Phase 9** — **animation + skeletal animation, orchestrated in C++**: glTF node (TRS)
+  animation + GPU skinning, with per-frame keyframe sampling (LINEAR/STEP/CUBICSPLINE,
+  SLERP), world-matrix recompose, and bone-palette computation all native. `loadGltf`
+  returns animation groups; `playAnimation`/`goToFrame`/etc. drive native playback. ✅
+  See `../.ai/phase9-animation-skinning.md`.
+
+## Animation + skeletal animation (Phase 9)
+
+glTF node animations and skeletons are driven entirely by the native engine (JS only
+parses the asset + controls playback). `loadGltf` exposes `scene.animationGroups`, which
+auto-play; the C++ render loop samples keyframes, recomposes node world matrices, and (for
+skins) computes the bone palette for GPU skinning each frame.
+
+```powershell
+# Node (TRS) animation — a box hierarchy that moves/rotates:
+build/bin/app.exe --prelude js/lite/index.js --script js/anim-boxanimated.js --show-fps
+
+# Skeletal animation (GPU skinning) — a walking figure / a fox:
+build/bin/app.exe --prelude js/lite/index.js --script js/anim-cesiumman.js --show-fps
+build/bin/app.exe --prelude js/lite/index.js --script js/anim-fox.js --show-fps
+```
+
+Animated/skinned glTF assets live in `assets/` (BoxAnimated, CesiumMan, Fox GLBs +
+AnimatedTriangle/SimpleSkin). The loader handles GLB, multi-buffer `.gltf` (external
+`.bin` / data-URI), generates normals when absent, and reverses winding for the Babylon
+RH→LH convention.
+
+## Perf benchmark (Phase 8)
+
+Measure per-frame time the same way Cedric's DawnTest bench does, so the numbers are
+directly comparable in format + methodology.
+
+```powershell
+cmake --build build --target app
+node tools/bench/run-bench.mjs --frames 600        # --no-open to skip the browser
+```
+
+The app renders `js/bench/scene200.js` (the thin-instance stress workload) with vsync
+off, drops the first frame as warmup, and prints one `BENCH …` line; the runner parses
+it into min/avg/p95/max ms + **FPS = 1000/avg_ms**, writing
+`tools/bench/out/bench-report.html`. It also **auto-discovers and runs Cedric's DawnTest
+(`Samples/webgpu-cross-platform-app/build-*/`) and the BabylonNative Playground** if
+they're built on this machine — giving a true same-hardware side-by-side — and always
+lists his published reference numbers as clearly-tagged cross-machine baselines.
+
+> ⚠️ Absolute ms is only comparable **on the same machine**. Our procedural meshes also
+> shade with the Standard shader (no PBR+IBL) and draw one call per visible instance (no
+> GPU instancing yet), so our ms/frame is lower than an equal-cost comparison would give.
+> See `../.ai/phase8-perf-bench.md` for the full caveats.
 
 ## Parity test framework (Phase 7)
 

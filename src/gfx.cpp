@@ -120,6 +120,29 @@ bool Gfx::initialize() {
     sEmissive_ = bgfx::createUniform("s_emissive", bgfx::UniformType::Sampler);
     sOcclusion_ = bgfx::createUniform("s_occlusion", bgfx::UniformType::Sampler);
 
+    // ---- Skinned PBR pipeline (vs_skinned + fs_pbr) ----
+    pbrSkinnedLayout_.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Tangent, 4, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Indices, 4, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Weight, 4, bgfx::AttribType::Float)
+        .end();
+    bgfx::ShaderHandle svsh = loadShader("vs_skinned.bin");
+    if (bgfx::isValid(svsh)) {
+        // fs_pbr is consumed by the non-skinned program (destroyShaders=true above), so
+        // load a fresh copy for the skinned program.
+        bgfx::ShaderHandle sfsh = loadShader("fs_pbr.bin");
+        pbrSkinnedProgram_ = bgfx::createProgram(svsh, sfsh, true);
+        uBones_ = bgfx::createUniform("u_bones", bgfx::UniformType::Mat4, kMaxBones);
+        if (!bgfx::isValid(pbrSkinnedProgram_)) {
+            std::fprintf(stderr, "[gfx] skinned createProgram failed\n");
+        }
+    } else {
+        std::fprintf(stderr, "[gfx] skinned vertex shader missing (skinning disabled)\n");
+    }
+
     // Default 1x1 textures for unbound slots.
     const uint8_t white[4] = { 255, 255, 255, 255 };
     const uint8_t flatN[4] = { 128, 128, 255, 255 };
@@ -372,6 +395,91 @@ void Gfx::drawMeshPBR(int meshId, const float worldMatrix[16], const PbrDraw& ma
     bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z
                    | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CCW | BGFX_STATE_MSAA);
     bgfx::submit(0, pbrProgram_);
+}
+
+int Gfx::createMeshSkinnedPBR(const float* pos, uint32_t posCount, const float* nrm, uint32_t nrmCount,
+                              const float* uv, uint32_t uvCount, const float* tan, uint32_t tanCount,
+                              const uint32_t* joints, const float* weights,
+                              const void* indices, uint32_t indexCount, bool index32) {
+    const uint32_t numVerts = posCount / 3;
+    if (numVerts == 0 || nrmCount != posCount) { return -1; }
+    // Interleave pos3/normal3/uv2/tangent4 (48 B) + indices4 f (16 B) + weight4 f (16 B) = 80 B.
+    // Bone indices are stored as Float (not Uint8) so the shader reads them cleanly: bgfx maps
+    // AttribType::Uint8 to an integer DXGI format, which a float `a_indices` would misread.
+    const uint32_t stride = 80;
+    std::vector<uint8_t> buf(size_t(numVerts) * stride);
+    for (uint32_t i = 0; i < numVerts; ++i) {
+        uint8_t* base = &buf[size_t(i) * stride];
+        float* f = reinterpret_cast<float*>(base);
+        f[0] = pos[i * 3 + 0]; f[1] = pos[i * 3 + 1]; f[2] = pos[i * 3 + 2];
+        f[3] = nrm[i * 3 + 0]; f[4] = nrm[i * 3 + 1]; f[5] = nrm[i * 3 + 2];
+        f[6] = (uv && uvCount >= (i + 1) * 2) ? uv[i * 2 + 0] : 0.0f;
+        f[7] = (uv && uvCount >= (i + 1) * 2) ? uv[i * 2 + 1] : 0.0f;
+        if (tan && tanCount >= (i + 1) * 4) {
+            f[8] = tan[i * 4 + 0]; f[9] = tan[i * 4 + 1]; f[10] = tan[i * 4 + 2]; f[11] = tan[i * 4 + 3];
+        } else {
+            f[8] = 1.0f; f[9] = 0.0f; f[10] = 0.0f; f[11] = 1.0f;
+        }
+        // indices (4 float) at offset 48, weight (4 float) at offset 64.
+        for (int k = 0; k < 4; ++k) {
+            uint32_t j = joints ? joints[i * 4 + k] : 0;
+            if (j >= uint32_t(kMaxBones)) { j = 0; }
+            f[12 + k] = float(j);
+        }
+        if (weights) {
+            f[16] = weights[i * 4 + 0]; f[17] = weights[i * 4 + 1]; f[18] = weights[i * 4 + 2]; f[19] = weights[i * 4 + 3];
+        } else {
+            f[16] = 1.0f; f[17] = f[18] = f[19] = 0.0f;
+        }
+    }
+    Mesh m;
+    m.vbh = bgfx::createVertexBuffer(bgfx::copy(buf.data(), uint32_t(buf.size())), pbrSkinnedLayout_);
+    const uint16_t flags = index32 ? BGFX_BUFFER_INDEX32 : BGFX_BUFFER_NONE;
+    m.ibh = bgfx::createIndexBuffer(bgfx::copy(indices, indexCount * (index32 ? 4u : 2u)), flags);
+    meshes_.push_back(m);
+    return int(meshes_.size() - 1);
+}
+
+void Gfx::drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
+                             const float* bonePalette, int boneCount, const PbrDraw& mat) {
+    if (meshId < 0 || meshId >= int(meshes_.size())) { return; }
+    if (!bgfx::isValid(pbrSkinnedProgram_)) { return; }
+    const Mesh& m = meshes_[size_t(meshId)];
+
+    auto texOr = [&](int id, bgfx::TextureHandle def) -> bgfx::TextureHandle {
+        return (id >= 0 && id < int(textures_.size()) && bgfx::isValid(textures_[size_t(id)])) ? textures_[size_t(id)] : def;
+    };
+    bgfx::setUniform(uBaseColorFactor_, mat.baseColor);
+    const float mr[4] = { mat.metallic, mat.roughness, mat.occlusionStrength, mat.alphaCutoff };
+    bgfx::setUniform(uMrParams_, mr);
+    const float em[4] = { mat.emissive[0], mat.emissive[1], mat.emissive[2], 0.0f };
+    bgfx::setUniform(uEmissiveFactor_, em);
+    const float flags[4] = { mat.texBase >= 0 ? 1.0f : 0.0f, mat.texMR >= 0 ? 1.0f : 0.0f,
+                             mat.texNormal >= 0 ? 1.0f : 0.0f, mat.texEmissive >= 0 ? 1.0f : 0.0f };
+    bgfx::setUniform(uTexFlags_, flags);
+    const float occ[4] = { mat.texOcclusion >= 0 ? 1.0f : 0.0f, 0, 0, 0 };
+    bgfx::setUniform(uOccFlag_, occ);
+    bgfx::setUniform(uPbrLightDir_, pbrLightDir_);
+    bgfx::setUniform(uPbrLightColor_, pbrLightColor_);
+    bgfx::setUniform(uAmbientSky_, pbrAmbientSky_);
+    bgfx::setUniform(uAmbientGround_, pbrAmbientGround_);
+    bgfx::setUniform(uEyePos_, eyePos_);
+
+    if (boneCount > kMaxBones) { boneCount = kMaxBones; }
+    bgfx::setUniform(uBones_, bonePalette, uint16_t(boneCount));
+
+    bgfx::setTexture(0, sBaseColor_, texOr(mat.texBase, whiteTex_));
+    bgfx::setTexture(1, sMetalRough_, texOr(mat.texMR, whiteTex_));
+    bgfx::setTexture(2, sNormalTex_, texOr(mat.texNormal, flatNormalTex_));
+    bgfx::setTexture(3, sEmissive_, texOr(mat.texEmissive, whiteTex_));
+    bgfx::setTexture(4, sOcclusion_, texOr(mat.texOcclusion, whiteTex_));
+
+    bgfx::setTransform(worldMatrix);
+    bgfx::setVertexBuffer(0, m.vbh);
+    bgfx::setIndexBuffer(m.ibh);
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z
+                   | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CCW | BGFX_STATE_MSAA);
+    bgfx::submit(0, pbrSkinnedProgram_);
 }
 
 void Gfx::registerOn(js::Host& host) {

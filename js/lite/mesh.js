@@ -34,6 +34,13 @@
         const o = options || {};
         return wrapMesh(__bl_createGround(o.width == null ? 1 : o.width, o.height == null ? 1 : o.height));
     };
+    BL.createTorus = function (engine, options) {
+        const o = options || {};
+        return wrapMesh(__bl_createTorus(
+            o.diameter == null ? 1 : o.diameter,
+            o.thickness == null ? 0.5 : o.thickness,
+            o.tessellation == null ? 16 : o.tessellation));
+    };
     BL.setThinInstances = function (mesh, matrices, count) { __bl_setThinInstances(mesh._id, matrices, count); };
 
     // Per-instance colors for thin instances: accepted + stored (native per-instance
