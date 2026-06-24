@@ -65,8 +65,9 @@
             const png = new Uint8Array(raw, binaryStart + m.position, m.length);
             __bl_setEnvFace(mip, face, png);
         }
-        // Babylon `.env` image-processing: tone mapping on, exposure 0.8.
-        __bl_setEnvParams(1.0, 0.8);
+        // Babylon `.env` image-processing: tone mapping on, exposure 0.8, contrast 1.2,
+        // and the prefilter LOD-generation scale (default 0.8) used by the specular LOD.
+        __bl_setEnvParams(1.0, 0.8, 0.8, 1.2);
         return Promise.resolve();
     };
 

@@ -26,6 +26,7 @@ uniform vec4 u_ambientSky;       // rgb hemispheric up colour (no-IBL fallback)
 uniform vec4 u_ambientGround;    // rgb hemispheric down colour (no-IBL fallback)
 uniform vec4 u_eyePos;           // xyz
 uniform vec4 u_envParams;        // x=numMips, y=intensity, z=hasEnv(1/0), w=exposure
+uniform vec4 u_envParams2;       // x=lodGenerationScale, y=contrast
 uniform vec4 u_envSH[9];         // pre-scaled SH irradiance (L00,L1_1,L10,L11,L2_2,L2_1,L20,L21,L22)
 
 #define PI 3.14159265359
@@ -70,10 +71,6 @@ vec2 envBRDFApprox(float NoV, float roughness) {
 	return vec2(-1.04, 1.04) * a004 + r.zw;
 }
 
-vec3 acesFilm(vec3 x) {
-	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
-
 void main()
 {
 	vec4 baseColor = u_baseColorFactor;
@@ -93,6 +90,7 @@ void main()
 	roughness = clamp(roughness, 0.04, 1.0);
 
 	vec3 N = normalize(v_normal);
+	vec3 geoN = N;                 // geometric (un-normal-mapped) normal, for horizon occlusion
 	if (u_texFlags.z > 0.5) {
 		vec3 nt = texture2D(s_normalTex, v_uv).xyz * 2.0 - 1.0;
 		vec3 T = normalize(v_tangent.xyz);
@@ -116,12 +114,14 @@ void main()
 	vec3 L = normalize(u_lightDir.xyz);
 	vec3 H = normalize(V + L);
 	float NdotL = max(dot(N, L), 0.0);
-	float NdotV = max(dot(N, V), 1e-4);
+	float NdotVUnclamped = dot(N, V);
+	float NdotV = max(NdotVUnclamped, 1e-4);
 	float NdotH = max(dot(N, H), 0.0);
 	float VdotH = max(dot(V, H), 0.0);
 
 	vec3 F0 = mix(vec3_splat(0.04), albedo, metallic);
-	vec3 diffuseColor = albedo * (1.0 - metallic);
+	// Babylon surfaceAlbedo: baseColor·(1−dielectricF0)·(1−metallic) (dielectricF0 = 0.04).
+	vec3 diffuseColor = albedo * 0.96 * (1.0 - metallic);
 
 	float D = distributionGGX(NdotH, roughness * roughness);
 	float G = geometrySmith(NdotV, NdotL, roughness);
@@ -133,15 +133,31 @@ void main()
 
 	vec3 ambient;
 	if (u_envParams.z > 0.5) {
-		// Image-based lighting: SH diffuse irradiance + prefiltered specular (split-sum).
+		// Image-based lighting — matches Babylon Lite's pbr-mr-helper IBL.
+		// Diffuse: SH irradiance × surface albedo × occlusion.
 		vec3 irr = max(shIrradiance(N), vec3_splat(0.0));
 		vec3 diffuseIBL = irr * diffuseColor * occlusion;
 
+		// Specular: prefiltered cube sampled at a roughness-derived LOD using Babylon's
+		// formula  specLod = log2(cubemapDim · alphaG) · lodGenerationScale  (alphaG =
+		// roughness²). Our previous lod = roughness·(numMips−1) under-blurred mid-roughness
+		// surfaces, reading a too-sharp mip → reflections looked too shiny/mirror-like.
+		float alphaG = roughness * roughness;
+		float maxLod = max(u_envParams.x - 1.0, 0.0);
+		float cubemapDim = exp2(maxLod);
+		float specLod = clamp(log2(cubemapDim * alphaG) * u_envParams2.x, 0.0, maxLod);
 		vec3 R = reflect(-V, N);
-		float lod = roughness * max(u_envParams.x - 1.0, 0.0);
-		vec3 prefiltered = textureCubeLod(s_envSpecular, R, lod).rgb;
+		vec3 prefiltered = textureCubeLod(s_envSpecular, R, specLod).rgb;
+
+		// Split-sum env BRDF (analytic) weighted by specular occlusion (seo) + horizon
+		// occlusion (eho) — Babylon reduces the environment reflectance with both.
 		vec2 ab = envBRDFApprox(NdotV, roughness);
-		vec3 specularIBL = prefiltered * (F0 * ab.x + vec3_splat(ab.y)) * occlusion;
+		vec3 specReflectance = F0 * ab.x + vec3_splat(ab.y);
+		float seo = clamp((NdotVUnclamped + occlusion) * (NdotVUnclamped + occlusion) - 1.0 + occlusion, 0.0, 1.0);
+		float gf = dot(geoN, V) > 0.0 ? 1.0 : -1.0;
+		float ehoT = clamp(1.0 + 1.1 * dot(R, geoN * gf), 0.0, 1.0);
+		float eho = ehoT * ehoT;
+		vec3 specularIBL = prefiltered * specReflectance * seo * eho;
 
 		ambient = (diffuseIBL + specularIBL) * u_envParams.y;
 	} else {
@@ -153,10 +169,13 @@ void main()
 	vec3 color = direct + ambient + emissive;
 
 	if (u_envParams.z > 0.5) {
-		// ACES tonemap + exposure + gamma (matches the .env image-processing path).
-		color *= u_envParams.w;
-		color = acesFilm(color);
-		color = pow(color, vec3_splat(1.0 / 2.2));
+		// Babylon image-processing: exposure → standard tonemap → gamma → clamp → contrast.
+		color = max(color, vec3_splat(0.0)) * u_envParams.w;          // exposure
+		color = vec3_splat(1.0) - exp2(-1.590579 * color);            // standard exponential tonemap
+		color = pow(max(color, vec3_splat(0.0)), vec3_splat(0.45454545)); // gamma encode
+		color = clamp(color, vec3_splat(0.0), vec3_splat(1.0));
+		vec3 highContrast = color * color * (vec3_splat(3.0) - color * 2.0);
+		color = mix(color, highContrast, max(u_envParams2.y - 1.0, 0.0)); // contrast (>1)
 	} else {
 		// Reinhard fallback for non-IBL scenes (unchanged behaviour).
 		color = color / (color + vec3_splat(1.0));

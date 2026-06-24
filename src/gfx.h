@@ -119,8 +119,9 @@ public:
     void uploadEnvFace(int mip, int face, int width, int height, const uint8_t* rgba8);
     // 9 pre-scaled SH irradiance coefficients (36 floats = 9 × vec4, rgb + pad).
     void setEnvironmentSH(const float* sh36);
-    // Activate IBL with the given environment intensity + tonemap exposure.
-    void setEnvironmentParams(float intensity, float exposure);
+    // Activate IBL with the given environment intensity + tonemap exposure, plus the
+    // prefilter LOD-generation scale and contrast (image-processing) from the .env.
+    void setEnvironmentParams(float intensity, float exposure, float lodScale, float contrast);
 
 private:
     struct Mesh {
@@ -175,8 +176,10 @@ private:
     bgfx::TextureHandle blackCube_ = BGFX_INVALID_HANDLE;   // 1x1 default when no env bound
     bgfx::UniformHandle sEnvSpecular_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle uEnvParams_ = BGFX_INVALID_HANDLE;  // x=numMips,y=intensity,z=hasEnv,w=exposure
+    bgfx::UniformHandle uEnvParams2_ = BGFX_INVALID_HANDLE; // x=lodGenerationScale,y=contrast
     bgfx::UniformHandle uEnvSH_ = BGFX_INVALID_HANDLE;      // 9 × vec4
     float envParams_[4] = { 1.0f, 1.0f, 0.0f, 1.0f };
+    float envParams2_[4] = { 0.8f, 1.0f, 0.0f, 0.0f };     // lodGenerationScale, contrast
     float envSH_[36] = { 0 };
     float pbrLightDir_[4] = { 0, 1, 0, 0 };
     float pbrLightColor_[4] = { 1, 1, 1, 1 };

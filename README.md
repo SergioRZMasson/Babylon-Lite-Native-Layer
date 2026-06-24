@@ -237,7 +237,10 @@ loader parses a Babylon `.env` (8-byte magic + JSON manifest + RGBD-encoded PNG 
 converts the 9 SH polynomial coefficients to pre-scaled harmonics, and uploads the 8 mip
 levels × 6 faces to a native cubemap; the fragment shader evaluates SH irradiance for
 diffuse and samples the prefiltered cube (LOD from roughness) for specular, with an
-analytic env-BRDF and ACES tone mapping. Scenes without an environment fall back to the
+analytic env-BRDF. The specular reflection LOD (`log2(cubemapDim·alphaG)·lodScale`), specular
++ horizon occlusion, and the image-processing (exposure → exponential tonemap → gamma →
+contrast) match Babylon Lite's `pbr-mr-helper` reference, so env-lit materials read with the
+right gloss instead of looking over-shiny. Scenes without an environment fall back to the
 previous hemispheric + Reinhard path unchanged.
 
 ```bat
@@ -246,8 +249,8 @@ build\bin\app.exe --prelude js\lite\index.js --script js\lite-boombox.js
 ```
 
 Gaps toward strict parity: skybox/ground background not drawn, `loadHdrEnvironment`
-(`.hdr`) not implemented, analytic BRDF instead of the BRDF-LUT texture, simplified
-specular LOD, and `.env` contrast not yet applied. See `../.ai/phase10-ibl-environment.md`.
+(`.hdr`) not implemented, and an analytic env-BRDF instead of the BRDF-LUT texture. See
+`../.ai/phase10-ibl-environment.md` and `../.ai/phase14-pbr-ibl-fidelity-fix.md`.
 
 ## Animation + skeletal animation (Phase 9)
 

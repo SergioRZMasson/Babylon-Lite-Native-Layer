@@ -122,6 +122,7 @@ bool Gfx::initialize() {
     // IBL / environment uniforms.
     sEnvSpecular_ = bgfx::createUniform("s_envSpecular", bgfx::UniformType::Sampler);
     uEnvParams_ = bgfx::createUniform("u_envParams", bgfx::UniformType::Vec4);
+    uEnvParams2_ = bgfx::createUniform("u_envParams2", bgfx::UniformType::Vec4);
     uEnvSH_ = bgfx::createUniform("u_envSH", bgfx::UniformType::Vec4, 9);
 
     // ---- Skinned PBR pipeline (vs_skinned + fs_pbr) ----
@@ -195,10 +196,12 @@ void Gfx::setEnvironmentSH(const float* sh36) {
     if (sh36) { std::memcpy(envSH_, sh36, sizeof(envSH_)); }
 }
 
-void Gfx::setEnvironmentParams(float intensity, float exposure) {
+void Gfx::setEnvironmentParams(float intensity, float exposure, float lodScale, float contrast) {
     envParams_[1] = intensity;
     envParams_[2] = 1.0f; // hasEnv
     envParams_[3] = exposure;
+    envParams2_[0] = lodScale > 0.0f ? lodScale : 0.8f;
+    envParams2_[1] = contrast;
 }
 
 void Gfx::shutdown() {
@@ -439,6 +442,7 @@ void Gfx::drawMeshPBR(int meshId, const float worldMatrix[16], const PbrDraw& ma
     bgfx::setTexture(3, sEmissive_, texOr(mat.texEmissive, whiteTex_));
     bgfx::setTexture(4, sOcclusion_, texOr(mat.texOcclusion, whiteTex_));
     bgfx::setUniform(uEnvParams_, envParams_);
+    bgfx::setUniform(uEnvParams2_, envParams2_);
     bgfx::setUniform(uEnvSH_, envSH_, 9);
     bgfx::setTexture(5, sEnvSpecular_, bgfx::isValid(envCube_) ? envCube_ : blackCube_);
 
@@ -528,6 +532,7 @@ void Gfx::drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
     bgfx::setTexture(3, sEmissive_, texOr(mat.texEmissive, whiteTex_));
     bgfx::setTexture(4, sOcclusion_, texOr(mat.texOcclusion, whiteTex_));
     bgfx::setUniform(uEnvParams_, envParams_);
+    bgfx::setUniform(uEnvParams2_, envParams2_);
     bgfx::setUniform(uEnvSH_, envSH_, 9);
     bgfx::setTexture(5, sEnvSpecular_, bgfx::isValid(envCube_) ? envCube_ : blackCube_);
 

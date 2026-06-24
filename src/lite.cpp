@@ -868,7 +868,10 @@ void Engine::registerOn(js::Host& host) {
         return info.Env().Undefined();
     });
     host.registerFunction("__bl_setEnvParams", [this](const Napi::CallbackInfo& info) -> Napi::Value {
-        if (gfx_) { gfx_->setEnvironmentParams(float(argf(info, 0, 1)), float(argf(info, 1, 1))); }
+        if (gfx_) {
+            gfx_->setEnvironmentParams(float(argf(info, 0, 1)), float(argf(info, 1, 1)),
+                                       float(argf(info, 2, 0.8)), float(argf(info, 3, 1.0)));
+        }
         return info.Env().Undefined();
     });
 
