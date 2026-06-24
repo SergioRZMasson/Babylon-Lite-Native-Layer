@@ -182,6 +182,12 @@ Chakra nearly halves the binary because the engine is the OS-provided DLL instea
   it to a native bgfx RGBA16F cubemap; the PBR shader does SH diffuse + prefiltered-cube
   specular IBL + ACES tone mapping. BoomBox now shows realistic metallic reflections. ✅
   See `../.ai/phase10-ibl-environment.md`.
+- **Phase 11** — **morph targets (blend shapes)**: the loader reads primitive `targets`
+  (POSITION/NORMAL deltas) + weight-animation channels; the native engine samples weights
+  per frame and rebuilds morphed vertices on the CPU (`base + Σ wᵢ·deltaᵢ`) into a dynamic
+  vertex buffer **before** GPU skinning, so the skinned+morphed scene5 Alien deforms
+  correctly. Also: external glTF image files now load. ✅
+  See `../.ai/phase11-morph-targets.md`.
 
 ## Environment maps / IBL (Phase 10)
 
@@ -222,6 +228,33 @@ Animated/skinned glTF assets live in `assets/` (BoxAnimated, CesiumMan, Fox GLBs
 AnimatedTriangle/SimpleSkin). The loader handles GLB, multi-buffer `.gltf` (external
 `.bin` / data-URI), generates normals when absent, and reverses winding for the Babylon
 RH→LH convention.
+
+## Morph targets (Phase 11)
+
+Morph-target (blend-shape) animation is evaluated natively. The loader reads each
+primitive's `targets` (POSITION/NORMAL deltas) and the weight-animation channels; the C++
+engine samples the weights each frame and rebuilds the morphed vertices on the CPU into a
+dynamic vertex buffer (`base + Σ weightᵢ·deltaᵢ`), **before** GPU skinning — so a mesh that
+is both skinned and morphed (the Alien) deforms correctly. Works for skinned and
+non-skinned morph meshes alike.
+
+```powershell
+# Scene 5 — Alien: a skinned + morph-target bust (facial blend + head motion):
+build/bin/app.exe --prelude js/lite/index.js --script js/tests/scene5-alien.js --show-fps
+```
+
+The Alien is a larger model downloaded from the playground CDN (like the GLBs, it is
+git-ignored). Fetch it into `assets/` before running:
+
+```powershell
+$base = "https://playground.babylonjs.com/scenes/Alien/"
+foreach ($f in @("Alien.gltf","Alien.bin","Alien_baseColor.png","Alien_occlusionRoughnessMetallic.png","Alien_normal.png")) {
+  Invoke-WebRequest -Uri ($base + $f) -OutFile "assets/$f" -UseBasicParsing
+}
+```
+
+The loader now also loads **external** glTF image files (`image.uri`), not just
+GLB-embedded textures, so the Alien's separate PNG maps render.
 
 ## Perf benchmark (Phase 8)
 

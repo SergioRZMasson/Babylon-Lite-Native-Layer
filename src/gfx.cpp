@@ -443,7 +443,8 @@ void Gfx::drawMeshPBR(int meshId, const float worldMatrix[16], const PbrDraw& ma
     bgfx::setTexture(5, sEnvSpecular_, bgfx::isValid(envCube_) ? envCube_ : blackCube_);
 
     bgfx::setTransform(worldMatrix);
-    bgfx::setVertexBuffer(0, m.vbh);
+    if (m.morphTargets > 0 && bgfx::isValid(m.dvbh)) { bgfx::setVertexBuffer(0, m.dvbh); }
+    else { bgfx::setVertexBuffer(0, m.vbh); }
     bgfx::setIndexBuffer(m.ibh);
     bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z
                    | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CCW | BGFX_STATE_MSAA);
@@ -531,11 +532,100 @@ void Gfx::drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
     bgfx::setTexture(5, sEnvSpecular_, bgfx::isValid(envCube_) ? envCube_ : blackCube_);
 
     bgfx::setTransform(worldMatrix);
-    bgfx::setVertexBuffer(0, m.vbh);
+    if (m.morphTargets > 0 && bgfx::isValid(m.dvbh)) { bgfx::setVertexBuffer(0, m.dvbh); }
+    else { bgfx::setVertexBuffer(0, m.vbh); }
     bgfx::setIndexBuffer(m.ibh);
     bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z
                    | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CCW | BGFX_STATE_MSAA);
     bgfx::submit(0, pbrSkinnedProgram_);
+}
+
+// Interleave PBR vertex data (pos3/normal3/uv2/tangent4 = 48 B) into `buf`.
+static void interleavePBR(std::vector<uint8_t>& buf, uint32_t numVerts,
+                          const float* pos, const float* nrm, const float* uv, uint32_t uvCount,
+                          const float* tan, uint32_t tanCount) {
+    buf.assign(size_t(numVerts) * 48, 0);
+    for (uint32_t i = 0; i < numVerts; ++i) {
+        float* o = reinterpret_cast<float*>(&buf[size_t(i) * 48]);
+        o[0] = pos[i * 3 + 0]; o[1] = pos[i * 3 + 1]; o[2] = pos[i * 3 + 2];
+        o[3] = nrm[i * 3 + 0]; o[4] = nrm[i * 3 + 1]; o[5] = nrm[i * 3 + 2];
+        o[6] = (uv && uvCount >= (i + 1) * 2) ? uv[i * 2 + 0] : 0.0f;
+        o[7] = (uv && uvCount >= (i + 1) * 2) ? uv[i * 2 + 1] : 0.0f;
+        if (tan && tanCount >= (i + 1) * 4) { o[8] = tan[i*4+0]; o[9] = tan[i*4+1]; o[10] = tan[i*4+2]; o[11] = tan[i*4+3]; }
+        else { o[8] = 1.0f; o[9] = 0.0f; o[10] = 0.0f; o[11] = 1.0f; }
+    }
+}
+
+int Gfx::createMeshMorphPBR(const float* pos, uint32_t posCount, const float* nrm, uint32_t nrmCount,
+                            const float* uv, uint32_t uvCount, const float* tan, uint32_t tanCount,
+                            const void* indices, uint32_t indexCount, bool index32,
+                            const float* dPos, const float* dNrm, int targetCount) {
+    const uint32_t numVerts = posCount / 3;
+    if (numVerts == 0 || nrmCount != posCount || targetCount <= 0) { return -1; }
+    Mesh m;
+    m.stride = 48; m.numVerts = numVerts; m.morphTargets = targetCount;
+    interleavePBR(m.morphBase, numVerts, pos, nrm, uv, uvCount, tan, tanCount);
+    m.morphDPos.assign(dPos, dPos + size_t(targetCount) * numVerts * 3);
+    if (dNrm) { m.morphDNrm.assign(dNrm, dNrm + size_t(targetCount) * numVerts * 3); }
+    m.dvbh = bgfx::createDynamicVertexBuffer(bgfx::copy(m.morphBase.data(), uint32_t(m.morphBase.size())), pbrLayout_);
+    const uint16_t flags = index32 ? BGFX_BUFFER_INDEX32 : BGFX_BUFFER_NONE;
+    m.ibh = bgfx::createIndexBuffer(bgfx::copy(indices, indexCount * (index32 ? 4u : 2u)), flags);
+    meshes_.push_back(std::move(m));
+    return int(meshes_.size() - 1);
+}
+
+int Gfx::createMeshMorphSkinnedPBR(const float* pos, uint32_t posCount, const float* nrm, uint32_t nrmCount,
+                                   const float* uv, uint32_t uvCount, const float* tan, uint32_t tanCount,
+                                   const uint32_t* joints, const float* weights,
+                                   const void* indices, uint32_t indexCount, bool index32,
+                                   const float* dPos, const float* dNrm, int targetCount) {
+    const uint32_t numVerts = posCount / 3;
+    if (numVerts == 0 || nrmCount != posCount || targetCount <= 0) { return -1; }
+    const uint32_t stride = 80;
+    Mesh m;
+    m.stride = stride; m.numVerts = numVerts; m.morphTargets = targetCount;
+    m.morphBase.assign(size_t(numVerts) * stride, 0);
+    for (uint32_t i = 0; i < numVerts; ++i) {
+        float* f = reinterpret_cast<float*>(&m.morphBase[size_t(i) * stride]);
+        f[0] = pos[i*3+0]; f[1] = pos[i*3+1]; f[2] = pos[i*3+2];
+        f[3] = nrm[i*3+0]; f[4] = nrm[i*3+1]; f[5] = nrm[i*3+2];
+        f[6] = (uv && uvCount >= (i + 1) * 2) ? uv[i*2+0] : 0.0f;
+        f[7] = (uv && uvCount >= (i + 1) * 2) ? uv[i*2+1] : 0.0f;
+        if (tan && tanCount >= (i + 1) * 4) { f[8] = tan[i*4+0]; f[9] = tan[i*4+1]; f[10] = tan[i*4+2]; f[11] = tan[i*4+3]; }
+        else { f[8] = 1.0f; f[9] = 0.0f; f[10] = 0.0f; f[11] = 1.0f; }
+        for (int k = 0; k < 4; ++k) { uint32_t j = joints ? joints[i*4+k] : 0; if (j >= uint32_t(kMaxBones)) { j = 0; } f[12 + k] = float(j); }
+        if (weights) { f[16] = weights[i*4+0]; f[17] = weights[i*4+1]; f[18] = weights[i*4+2]; f[19] = weights[i*4+3]; }
+        else { f[16] = 1.0f; f[17] = f[18] = f[19] = 0.0f; }
+    }
+    m.morphDPos.assign(dPos, dPos + size_t(targetCount) * numVerts * 3);
+    if (dNrm) { m.morphDNrm.assign(dNrm, dNrm + size_t(targetCount) * numVerts * 3); }
+    m.dvbh = bgfx::createDynamicVertexBuffer(bgfx::copy(m.morphBase.data(), uint32_t(m.morphBase.size())), pbrSkinnedLayout_);
+    const uint16_t flags = index32 ? BGFX_BUFFER_INDEX32 : BGFX_BUFFER_NONE;
+    m.ibh = bgfx::createIndexBuffer(bgfx::copy(indices, indexCount * (index32 ? 4u : 2u)), flags);
+    meshes_.push_back(std::move(m));
+    return int(meshes_.size() - 1);
+}
+
+void Gfx::updateMeshMorph(int meshId, const float* weights, int count) {
+    if (meshId < 0 || meshId >= int(meshes_.size())) { return; }
+    Mesh& m = meshes_[size_t(meshId)];
+    if (m.morphTargets <= 0 || !bgfx::isValid(m.dvbh) || m.morphBase.empty()) { return; }
+    if (count > m.morphTargets) { count = m.morphTargets; }
+    std::vector<uint8_t> work = m.morphBase;   // copy rest pose, then add weighted deltas
+    const uint32_t nv = m.numVerts, stride = m.stride;
+    const bool hasNrm = !m.morphDNrm.empty();
+    for (int t = 0; t < count; ++t) {
+        const float w = weights[t];
+        if (w == 0.0f) { continue; }
+        const float* dp = &m.morphDPos[size_t(t) * nv * 3];
+        const float* dn = hasNrm ? &m.morphDNrm[size_t(t) * nv * 3] : nullptr;
+        for (uint32_t i = 0; i < nv; ++i) {
+            float* f = reinterpret_cast<float*>(&work[size_t(i) * stride]);
+            f[0] += w * dp[i*3+0]; f[1] += w * dp[i*3+1]; f[2] += w * dp[i*3+2];
+            if (dn) { f[3] += w * dn[i*3+0]; f[4] += w * dn[i*3+1]; f[5] += w * dn[i*3+2]; }
+        }
+    }
+    bgfx::update(m.dvbh, 0, bgfx::copy(work.data(), uint32_t(work.size())));
 }
 
 void Gfx::registerOn(js::Host& host) {

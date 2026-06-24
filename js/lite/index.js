@@ -46,6 +46,7 @@
                 }
             }
             this.get = function (k) { return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null; };
+            this.has = function (k) { return Object.prototype.hasOwnProperty.call(map, k); };
         };
     }
 

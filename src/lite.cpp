@@ -255,14 +255,21 @@ void Engine::updateAnimations(float dt) {
         }
         for (const AnimChannel& ch : clip.channels) {
             if (ch.node < 0 || ch.node >= int(nodes_.size()) || ch.sampler < 0) { continue; }
+            Node& n = nodes_[size_t(ch.node)];
+            if (ch.path == 3) { // morph weights: sample `comp` values into the node's weight array
+                const int wcount = clip.samplers[size_t(ch.sampler)].comp;
+                if (wcount <= 0) { continue; }
+                if (int(n.weights.size()) < wcount) { n.weights.resize(size_t(wcount), 0.0f); }
+                sampleChannel(clip, ch, clip.time, n.weights.data());
+                continue;
+            }
             float v[4] = { 0, 0, 0, 1 };
             sampleChannel(clip, ch, clip.time, v);
-            Node& n = nodes_[size_t(ch.node)];
             switch (ch.path) {
                 case 0: n.t[0] = v[0]; n.t[1] = v[1]; n.t[2] = v[2]; break;            // translation
                 case 1: n.r[0] = v[0]; n.r[1] = v[1]; n.r[2] = v[2]; n.r[3] = v[3]; break; // rotation
                 case 2: n.s[0] = v[0]; n.s[1] = v[1]; n.s[2] = v[2]; break;            // scale
-                default: break;                                                       // weights: TODO
+                default: break;
             }
         }
     }
@@ -332,6 +339,13 @@ int Engine::renderFrame(float timeSec) {
             computeWorld(meshId);
         }
         if (m.geomId < 0) { continue; }
+
+        // Morph targets: re-evaluate the mesh geometry from the bound node's weights before
+        // drawing (and before GPU skinning samples the vertex buffer).
+        if (m.morph && m.node >= 0 && m.node < int(nodes_.size())) {
+            const std::vector<float>& w = nodes_[size_t(m.node)].weights;
+            if (!w.empty()) { gfx_->updateMeshMorph(m.geomId, w.data(), int(w.size())); }
+        }
 
         const Material& mat = (m.materialId >= 0) ? materials_[size_t(m.materialId)] : Material{};
 
@@ -717,6 +731,77 @@ void Engine::registerOn(js::Host& host) {
         return info.Env().Undefined();
     });
 
+    // Morph-target PBR mesh (non-skinned): (pos, nrm, uv, tan, idx, targetCount, dPos, dNrm).
+    // dPos/dNrm are Float32 position/normal deltas (targetCount * numVerts * 3, target-major);
+    // dNrm may be empty.
+    host.registerFunction("__bl_createMeshMorphPBR", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        Napi::Env env = info.Env();
+        if (!gfx_ || info.Length() < 8) { return Napi::Number::New(env, -1); }
+        size_t pl = 0, nl = 0, ul = 0, tl = 0, il = 0, dpl = 0, dnl = 0;
+        const uint8_t* pos = js::argBytes(info, 0, &pl);
+        const uint8_t* nrm = js::argBytes(info, 1, &nl);
+        const uint8_t* uv = js::argBytes(info, 2, &ul);
+        const uint8_t* tan = js::argBytes(info, 3, &tl);
+        const uint8_t* idx = js::argBytes(info, 4, &il);
+        const int targetCount = int(argf(info, 5, 0));
+        const uint8_t* dpos = js::argBytes(info, 6, &dpl);
+        const uint8_t* dnrm = js::argBytes(info, 7, &dnl);
+        if (!pos || !nrm || !idx || !dpos || targetCount <= 0) { return Napi::Number::New(env, -1); }
+        const int gid = gfx_->createMeshMorphPBR(
+            reinterpret_cast<const float*>(pos), uint32_t(pl / 4),
+            reinterpret_cast<const float*>(nrm), uint32_t(nl / 4),
+            reinterpret_cast<const float*>(uv), uint32_t(ul / 4),
+            reinterpret_cast<const float*>(tan), uint32_t(tl / 4),
+            idx, uint32_t(il / 4), /*index32=*/true,
+            reinterpret_cast<const float*>(dpos),
+            (dnrm && dnl) ? reinterpret_cast<const float*>(dnrm) : nullptr, targetCount);
+        Mesh m; m.pbr = true; m.geomId = gid; m.morph = true; m.morphTargetCount = targetCount;
+        meshes_.push_back(std::move(m));
+        return Napi::Number::New(env, int(meshes_.size() - 1));
+    });
+
+    // Morph-target skinned PBR mesh: (pos, nrm, uv, tan, joints, weights, idx, targetCount, dPos, dNrm).
+    host.registerFunction("__bl_createMeshMorphSkinnedPBR", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        Napi::Env env = info.Env();
+        if (!gfx_ || info.Length() < 10) { return Napi::Number::New(env, -1); }
+        size_t pl = 0, nl = 0, ul = 0, tl = 0, jl = 0, wl = 0, il = 0, dpl = 0, dnl = 0;
+        const uint8_t* pos = js::argBytes(info, 0, &pl);
+        const uint8_t* nrm = js::argBytes(info, 1, &nl);
+        const uint8_t* uv = js::argBytes(info, 2, &ul);
+        const uint8_t* tan = js::argBytes(info, 3, &tl);
+        const uint8_t* joints = js::argBytes(info, 4, &jl);
+        const uint8_t* weights = js::argBytes(info, 5, &wl);
+        const uint8_t* idx = js::argBytes(info, 6, &il);
+        const int targetCount = int(argf(info, 7, 0));
+        const uint8_t* dpos = js::argBytes(info, 8, &dpl);
+        const uint8_t* dnrm = js::argBytes(info, 9, &dnl);
+        if (!pos || !nrm || !idx || !joints || !weights || !dpos || targetCount <= 0) { return Napi::Number::New(env, -1); }
+        const int gid = gfx_->createMeshMorphSkinnedPBR(
+            reinterpret_cast<const float*>(pos), uint32_t(pl / 4),
+            reinterpret_cast<const float*>(nrm), uint32_t(nl / 4),
+            reinterpret_cast<const float*>(uv), uint32_t(ul / 4),
+            reinterpret_cast<const float*>(tan), uint32_t(tl / 4),
+            reinterpret_cast<const uint32_t*>(joints), reinterpret_cast<const float*>(weights),
+            idx, uint32_t(il / 4), /*index32=*/true,
+            reinterpret_cast<const float*>(dpos),
+            (dnrm && dnl) ? reinterpret_cast<const float*>(dnrm) : nullptr, targetCount);
+        Mesh m; m.pbr = true; m.geomId = gid; m.morph = true; m.morphTargetCount = targetCount;
+        meshes_.push_back(std::move(m));
+        return Napi::Number::New(env, int(meshes_.size() - 1));
+    });
+
+    // Initialise a node's morph weights (the rest/default weights before animation runs).
+    host.registerFunction("__bl_setNodeWeights", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int node = int(argf(info, 0, -1));
+        size_t bytes = 0;
+        const uint8_t* w = js::argBytes(info, 1, &bytes);
+        if (node >= 0 && node < int(nodes_.size()) && w && bytes) {
+            const float* wp = reinterpret_cast<const float*>(w);
+            nodes_[size_t(node)].weights.assign(wp, wp + bytes / 4);
+        }
+        return info.Env().Undefined();
+    });
+
     // ---- image-based lighting (environment) ----
     host.registerFunction("__bl_createEnvironment", [this](const Napi::CallbackInfo& info) -> Napi::Value {
         if (gfx_) { gfx_->createEnvironment(int(argf(info, 0, 128)), int(argf(info, 1, 1))); }
@@ -828,9 +913,16 @@ void Engine::registerOn(js::Host& host) {
                 // Apply the pose immediately (sample channels at the new time).
                 for (const AnimChannel& ch : clip.channels) {
                     if (ch.node < 0 || ch.node >= int(nodes_.size()) || ch.sampler < 0) { continue; }
+                    Node& n = nodes_[size_t(ch.node)];
+                    if (ch.path == 3) { // morph weights
+                        const int wcount = clip.samplers[size_t(ch.sampler)].comp;
+                        if (wcount <= 0) { continue; }
+                        if (int(n.weights.size()) < wcount) { n.weights.resize(size_t(wcount), 0.0f); }
+                        sampleChannel(clip, ch, clip.time, n.weights.data());
+                        continue;
+                    }
                     float v[4] = { 0, 0, 0, 1 };
                     sampleChannel(clip, ch, clip.time, v);
-                    Node& n = nodes_[size_t(ch.node)];
                     if (ch.path == 0) { n.t[0] = v[0]; n.t[1] = v[1]; n.t[2] = v[2]; }
                     else if (ch.path == 1) { n.r[0] = v[0]; n.r[1] = v[1]; n.r[2] = v[2]; n.r[3] = v[3]; }
                     else if (ch.path == 2) { n.s[0] = v[0]; n.s[1] = v[1]; n.s[2] = v[2]; }

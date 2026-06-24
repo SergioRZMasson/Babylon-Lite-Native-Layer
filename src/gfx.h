@@ -95,6 +95,23 @@ public:
     void drawMeshSkinnedPBR(int meshId, const float worldMatrix[16],
                             const float* bonePalette, int boneCount, const PbrDraw& mat);
 
+    // ---- Morph targets (CPU morph -> dynamic vertex buffer) ----
+    // Create a morph-capable PBR mesh (optionally skinned). `dPos`/`dNrm` hold per-target
+    // position/normal deltas (targetCount * numVerts * 3 floats, target-major); `dNrm` may
+    // be null. The vertex buffer is dynamic and rebuilt each frame from base + Σ weight·delta.
+    int createMeshMorphPBR(const float* pos, uint32_t posCount, const float* nrm, uint32_t nrmCount,
+                           const float* uv, uint32_t uvCount, const float* tan, uint32_t tanCount,
+                           const void* indices, uint32_t indexCount, bool index32,
+                           const float* dPos, const float* dNrm, int targetCount);
+    int createMeshMorphSkinnedPBR(const float* pos, uint32_t posCount, const float* nrm, uint32_t nrmCount,
+                                  const float* uv, uint32_t uvCount, const float* tan, uint32_t tanCount,
+                                  const uint32_t* joints, const float* weights,
+                                  const void* indices, uint32_t indexCount, bool index32,
+                                  const float* dPos, const float* dNrm, int targetCount);
+    // Re-evaluate a morph mesh's vertices: pos/normal = base + Σ weights[t]·delta[t]; uploads
+    // to the dynamic vertex buffer. `count` weights are applied (clamped to the target count).
+    void updateMeshMorph(int meshId, const float* weights, int count);
+
     // ---- Image-based lighting (environment) ----
     // Create the prefiltered specular cubemap (RGBA16F, `numMips` mip levels, `faceSize`²).
     void createEnvironment(int faceSize, int numMips);
@@ -109,6 +126,14 @@ private:
     struct Mesh {
         bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
         bgfx::IndexBufferHandle ibh = BGFX_INVALID_HANDLE;
+        // Morph targets: when set, the mesh draws from `dvbh` (a dynamic vertex buffer)
+        // re-evaluated each frame as base + Σ weight·delta. `morphBase` is the interleaved
+        // rest-pose buffer; position lives at float offset 0, normal at 3 (both layouts).
+        bgfx::DynamicVertexBufferHandle dvbh = BGFX_INVALID_HANDLE;
+        uint32_t stride = 0, numVerts = 0;
+        int morphTargets = 0;
+        std::vector<uint8_t> morphBase;            // numVerts * stride
+        std::vector<float> morphDPos, morphDNrm;   // morphTargets * numVerts * 3
     };
 
     bgfx::ProgramHandle program_ = BGFX_INVALID_HANDLE;

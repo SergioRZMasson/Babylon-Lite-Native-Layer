@@ -269,6 +269,14 @@
                 const buf = buffers[bv.buffer || 0];
                 const bytes = new Uint8Array(buf.dv.buffer, buf.dv.byteOffset + buf.base + (bv.byteOffset || 0), bv.byteLength);
                 id = __bl_createTextureEncoded(bytes);
+            } else if (image && image.uri) {
+                // External image file or data URI (glTF, as opposed to GLB-embedded).
+                if (image.uri.lastIndexOf("data:", 0) === 0) {
+                    id = __bl_createTextureEncoded(BL.base64ToBytes(image.uri.slice(image.uri.indexOf(",") + 1)));
+                } else {
+                    const ab = __bl_readFile(decodeURIComponent(image.uri));
+                    if (ab) { id = __bl_createTextureEncoded(new Uint8Array(ab)); }
+                }
             }
             texCache[imgIdx] = id;
             return id;
@@ -325,6 +333,21 @@
                 // Reverse winding to compensate the RH→LH mirror (keeps CULL_CCW correct).
                 for (let i = 0; i + 2 < idx.length; i += 3) { const t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t; }
 
+                // Morph targets (POSITION/NORMAL deltas, target-major) → CPU morph natively.
+                const targets = prim.targets || [];
+                const tCount = targets.length;
+                let dPos = null, dNrm = null;
+                if (tCount > 0) {
+                    dPos = new Float32Array(tCount * nVerts * 3);
+                    const haveNrm = targets.every(function (t) { return t.NORMAL != null; });
+                    if (haveNrm) { dNrm = new Float32Array(tCount * nVerts * 3); }
+                    for (let t = 0; t < tCount; t++) {
+                        dPos.set(readAccessor(json, buffers, targets[t].POSITION), t * nVerts * 3);
+                        if (haveNrm) { dNrm.set(readAccessor(json, buffers, targets[t].NORMAL), t * nVerts * 3); }
+                    }
+                }
+                const emptyDelta = new Float32Array(0);
+
                 // Skinned primitive (skeleton): build a skinned mesh + bind the skin so the
                 // native engine computes the bone palette each frame (GPU skinning).
                 const skinned = node.skin != null && attr.JOINTS_0 != null && attr.WEIGHTS_0 != null;
@@ -332,11 +355,24 @@
                 if (skinned) {
                     const joints = readIntAccessor(json, buffers, attr.JOINTS_0);   // Uint32 vec4/vertex
                     const wts = readAccessor(json, buffers, attr.WEIGHTS_0);        // Float32 vec4/vertex
-                    meshId = __bl_createMeshSkinnedPBR(pos, nrm, uv, tan, joints, wts, idx);
+                    if (tCount > 0) {
+                        meshId = __bl_createMeshMorphSkinnedPBR(pos, nrm, uv, tan, joints, wts, idx, tCount, dPos, dNrm || emptyDelta);
+                    } else {
+                        meshId = __bl_createMeshSkinnedPBR(pos, nrm, uv, tan, joints, wts, idx);
+                    }
                     const skinId = buildSkin(json, buffers, node.skin, nodeBase, skinCache);
                     __bl_setMeshSkin(meshId, skinId);
+                } else if (tCount > 0) {
+                    meshId = __bl_createMeshMorphPBR(pos, nrm, uv, tan, idx, tCount, dPos, dNrm || emptyDelta);
                 } else {
                     meshId = __bl_createMeshPBR(pos, nrm, uv, tan, idx);
+                }
+                // Initial morph weights: node.weights override mesh.weights (default 0).
+                if (tCount > 0) {
+                    const dw = (node.weights || mesh.weights || []);
+                    const w = new Float32Array(tCount);
+                    for (let k = 0; k < tCount && k < dw.length; k++) { w[k] = dw[k]; }
+                    __bl_setNodeWeights(nodeBase + ni, w);
                 }
                 __bl_setMeshNode(meshId, nodeBase + ni);   // mesh world follows its node
                 __bl_setMeshMaterial(meshId, buildMaterial(prim.material));

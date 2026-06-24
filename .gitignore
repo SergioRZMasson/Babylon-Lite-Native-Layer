@@ -8,6 +8,8 @@
 
 # Large downloaded model assets
 assets/*.glb
+assets/Alien.gltf
+assets/Alien.bin
 
 # Tooling deps (esbuild for tools/translate_scenes.mjs) + parity/bench run output
 node_modules/

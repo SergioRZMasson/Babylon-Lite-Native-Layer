@@ -54,6 +54,8 @@ struct Mesh {
     bool hasBaseMatrix = false; // glTF nodes supply a baked local→world matrix (column-major)
     int node = -1;             // bound animation node (mesh world follows nodes_[node].world)
     int skin = -1;             // skin index for GPU skinning (-1 = not skinned)
+    bool morph = false;        // has morph targets (geometry re-evaluated per frame from node weights)
+    int morphTargetCount = 0;  // number of morph targets
     float baseMatrix[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
     float pos[3] = { 0, 0, 0 };
     float rot[3] = { 0, 0, 0 }; // euler radians (Babylon yaw-pitch-roll)
@@ -78,6 +80,7 @@ struct Node {
     float t[3] = { 0, 0, 0 };
     float r[4] = { 0, 0, 0, 1 };   // quaternion (x,y,z,w)
     float s[3] = { 1, 1, 1 };
+    std::vector<float> weights;     // morph-target weights (driven by weights animation channels)
     float world[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
     bool worldDone = false;
 };
