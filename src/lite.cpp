@@ -656,6 +656,40 @@ void Engine::registerOn(js::Host& host) {
         return ab;
     });
 
+    // Quiet existence check (no "not found" log): true if the file is present locally or
+    // under the assets dir (by basename). Used by the HTTP loader to decide whether to
+    // download a remote asset.
+    host.registerFunction("__bl_fileExists", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        namespace fs = std::filesystem;
+        const std::string path = js::argStr(info, 0);
+        bool exists = fs::exists(path);
+        if (!exists) {
+            const std::string bn = baseName(path);
+            exists = (!assetsDir_.empty() && fs::exists(fs::path(assetsDir_) / bn))
+                     || fs::exists(fs::path("assets") / bn);
+        }
+        return Napi::Boolean::New(info.Env(), exists);
+    });
+
+    // Write downloaded bytes into the assets dir (keyed by basename) so the existing
+    // synchronous readers (__bl_readFile / loadBuffers / texFor) find them locally — i.e.
+    // an HTTP-fetched asset becomes a local asset (and is cached for subsequent runs).
+    host.registerFunction("__bl_cacheFile", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        namespace fs = std::filesystem;
+        const std::string name = js::argStr(info, 0);
+        size_t bytes = 0;
+        const uint8_t* data = js::argBytes(info, 1, &bytes);
+        if (name.empty() || !data) { return Napi::Boolean::New(info.Env(), false); }
+        const fs::path dir = assetsDir_.empty() ? fs::path("assets") : fs::path(assetsDir_);
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const fs::path out = dir / baseName(name);
+        std::ofstream os(out, std::ios::binary);
+        if (!os) { std::fprintf(stderr, "[lite] cacheFile: cannot write %s\n", out.string().c_str()); return Napi::Boolean::New(info.Env(), false); }
+        os.write(reinterpret_cast<const char*>(data), std::streamsize(bytes));
+        return Napi::Boolean::New(info.Env(), true);
+    });
+
     host.registerFunction("__bl_createMeshPBR", [this](const Napi::CallbackInfo& info) -> Napi::Value {
         Napi::Env env = info.Env();
         if (!gfx_ || info.Length() < 5) { return Napi::Number::New(env, -1); }

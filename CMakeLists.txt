@@ -70,17 +70,61 @@ endif()
 # ---------------------------------------------------------------------------
 # JS engine via Node-API (node-addon-api). The native seam is written against the
 # engine-agnostic Napi:: API, so the engine is swapped at build time exactly like
-# Babylon Native. JsRuntimeHost provides the Node-API implementation per engine; we
-# pull ONLY its `napi` target (SOURCE_SUBDIR Core/Node-API), not its heavy root.
+# Babylon Native. JsRuntimeHost provides the Node-API implementation per engine.
 #   -DJS_ENGINE=Chakra  (Windows in-box engine, linked via chakrart.lib → Chakra.dll)
+#
+# Optional browser-like polyfills (JsRuntimeHost), each a separate static library
+# toggled at configure time — the same model Babylon Native uses:
+#   -DBL_POLYFILL_URL=ON             URL / URLSearchParams
+#   -DBL_POLYFILL_XMLHTTPREQUEST=ON  XMLHttpRequest (HTTP; pulls UrlLib + arcana)
+# When any polyfill is enabled we pull the full JsRuntimeHost root (so JsRuntime +
+# the polyfills build); otherwise we pull ONLY its `napi` target to stay minimal.
 # ---------------------------------------------------------------------------
+option(BL_POLYFILL_URL "Include the JsRuntimeHost URL/URLSearchParams polyfill" OFF)
+option(BL_POLYFILL_XMLHTTPREQUEST "Include the JsRuntimeHost XMLHttpRequest polyfill (HTTP downloads; pulls UrlLib)" OFF)
+
 set(JS_ENGINE "Chakra" CACHE STRING "JavaScript engine for the Node-API host (Chakra)")
 set(NAPI_JAVASCRIPT_ENGINE "${JS_ENGINE}" CACHE STRING "" FORCE)
 set(NAPI_BUILD_ABI ON CACHE BOOL "" FORCE)  # compile the engine's Node-API impl from source
-FetchContent_Declare(jsRuntimeHost
-    GIT_REPOSITORY https://github.com/BabylonJS/JsRuntimeHost.git
-    GIT_TAG 808601482588b7f806d91231288310b94766dc84      # same commit Babylon Native pins
-    SOURCE_SUBDIR Core/Node-API)
+
+set(_BL_POLYFILLS OFF)
+if(BL_POLYFILL_URL OR BL_POLYFILL_XMLHTTPREQUEST)
+    set(_BL_POLYFILLS ON)
+endif()
+
+if(_BL_POLYFILLS)
+    # Pull the full JsRuntimeHost root: builds Core (napi + napi-extensions + Foundation +
+    # JsRuntime) and the selected polyfills. Disable everything we don't use to stay lean.
+    set(JSRUNTIMEHOST_TESTS OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_CORE_APPRUNTIME OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_CORE_SCRIPTLOADER OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_CONSOLE OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_SCHEDULING OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_ABORT_CONTROLLER OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_WEBSOCKET OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_BLOB OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_PERFORMANCE OFF CACHE BOOL "" FORCE)
+    set(JSRUNTIMEHOST_POLYFILL_TEXTDECODER OFF CACHE BOOL "" FORCE)
+    if(BL_POLYFILL_URL)
+        set(JSRUNTIMEHOST_POLYFILL_URL ON CACHE BOOL "" FORCE)
+    else()
+        set(JSRUNTIMEHOST_POLYFILL_URL OFF CACHE BOOL "" FORCE)
+    endif()
+    if(BL_POLYFILL_XMLHTTPREQUEST)
+        set(JSRUNTIMEHOST_POLYFILL_XMLHTTPREQUEST ON CACHE BOOL "" FORCE)
+    else()
+        set(JSRUNTIMEHOST_POLYFILL_XMLHTTPREQUEST OFF CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_Declare(jsRuntimeHost
+        GIT_REPOSITORY https://github.com/BabylonJS/JsRuntimeHost.git
+        GIT_TAG 808601482588b7f806d91231288310b94766dc84)      # same commit Babylon Native pins
+else()
+    # Minimal: pull ONLY the `napi` target (SOURCE_SUBDIR Core/Node-API), not the heavy root.
+    FetchContent_Declare(jsRuntimeHost
+        GIT_REPOSITORY https://github.com/BabylonJS/JsRuntimeHost.git
+        GIT_TAG 808601482588b7f806d91231288310b94766dc84
+        SOURCE_SUBDIR Core/Node-API)
+endif()
 FetchContent_MakeAvailable(jsRuntimeHost)
 
 # node-addon-api requires exactly one exception mode to be selected. PUBLIC so it
@@ -141,6 +185,17 @@ target_include_directories(app PRIVATE src src/js src/third_party)
 target_link_libraries(app PRIVATE bgfx bx bimg napi)
 target_compile_definitions(app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
     BL_JS_ENGINE="${JS_ENGINE}")
+
+# Optional polyfill static libraries (JsRuntimeHost). Each links JsRuntime transitively;
+# the host (src/js/js_host.cpp) gates its Initialize() calls on the same macros.
+if(BL_POLYFILL_URL)
+    target_link_libraries(app PRIVATE URL)
+    target_compile_definitions(app PRIVATE BL_POLYFILL_URL)
+endif()
+if(BL_POLYFILL_XMLHTTPREQUEST)
+    target_link_libraries(app PRIVATE XMLHttpRequest)
+    target_compile_definitions(app PRIVATE BL_POLYFILL_XMLHTTPREQUEST)
+endif()
 
 set_target_properties(app PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

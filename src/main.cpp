@@ -299,6 +299,23 @@ int main(int argc, char** argv) {
         return 1;
     }
     host.pumpJobs(); // let the demo's async main() settle (registerScene/startEngine)
+    // With the HTTP polyfills enabled, asset loading (loadGltf / loadEnvironment / textures)
+    // may download over the network asynchronously — main() then completes across several
+    // dispatcher round-trips. Pump the microtask + polyfill-dispatch queues until the scene
+    // is ready (frame callback installed by startEngine, or a native/lite scene registered)
+    // or a timeout. No-op for synchronous/local loads (the conditions are already met).
+    if (host.polyfillsActive()) {
+        const double deadlineMs = bench::monotonicMillis() + 60000.0;
+        while (!host.hasFrameCallback() && !lite.hasActiveScene() && !world.started()) {
+            host.pumpDispatch();
+            host.pumpJobs();
+            if (bench::monotonicMillis() > deadlineMs) {
+                std::fprintf(stderr, "[main] async asset load timed out\n");
+                break;
+            }
+            ::Sleep(1);
+        }
+    }
 
     bool resized = false;
     window.setResizeCallback([&](int w, int h) {

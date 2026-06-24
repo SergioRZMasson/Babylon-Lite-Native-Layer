@@ -8,6 +8,16 @@
 
 #include <napi/env.h>
 
+#if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)
+#include <Babylon/JsRuntime.h>
+#endif
+#ifdef BL_POLYFILL_URL
+#include <Babylon/Polyfills/URL.h>
+#endif
+#ifdef BL_POLYFILL_XMLHTTPREQUEST
+#include <Babylon/Polyfills/XMLHttpRequest.h>
+#endif
+
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -85,6 +95,10 @@ bool Host::initialize() {
     }
     installConsole();
 
+#if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)
+    initializePolyfills();
+#endif
+
     // setFrameCallback(fn): JS registers its per-frame function here.
     registerFunction("setFrameCallback", [this](const Napi::CallbackInfo& info) -> Napi::Value {
         if (info.Length() >= 1 && info[0].IsFunction()) {
@@ -121,6 +135,56 @@ void Host::installConsole() {
     console.Set("error", logFn);
     console.Set("debug", logFn);
     env_.Global().Set("console", console);
+}
+
+#if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)
+void Host::initializePolyfills() {
+    Napi::HandleScope scope(env_);
+    // The polyfills run async work (UrlLib HTTP) on background threads; JsRuntime marshals
+    // each completion back to the JS thread through this dispatch function, which simply
+    // queues it. We drain the queue on the JS thread in pumpDispatch() (per frame / while
+    // the bootstrap waits for async asset loads). Capturing `this` is safe: the Host is
+    // fully constructed and the queue/mutex are live for the runtime's lifetime.
+    Babylon::JsRuntime::CreateForJavaScript(env_, [this](std::function<void(Napi::Env)> func) {
+        std::lock_guard<std::mutex> lock(dispatchMutex_);
+        dispatchQueue_.push(std::move(func));
+    });
+#ifdef BL_POLYFILL_URL
+    Babylon::Polyfills::URL::Initialize(env_);
+#endif
+#ifdef BL_POLYFILL_XMLHTTPREQUEST
+    Babylon::Polyfills::XMLHttpRequest::Initialize(env_);
+#endif
+    polyfillsActive_ = true;
+    std::fprintf(stderr, "[js] polyfills initialized:"
+#ifdef BL_POLYFILL_URL
+        " URL"
+#endif
+#ifdef BL_POLYFILL_XMLHTTPREQUEST
+        " XMLHttpRequest"
+#endif
+        "\n");
+}
+#endif
+
+void Host::pumpDispatch() {
+#if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)
+    for (;;) {
+        std::function<void(Napi::Env)> fn;
+        {
+            std::lock_guard<std::mutex> lock(dispatchMutex_);
+            if (dispatchQueue_.empty()) { break; }
+            fn = std::move(dispatchQueue_.front());
+            dispatchQueue_.pop();
+        }
+        Napi::HandleScope scope(env_);
+        try {
+            fn(env_);
+        } catch (const Napi::Error& e) {
+            std::fprintf(stderr, "[js] dispatch exception: %s\n", e.what());
+        }
+    }
+#endif
 }
 
 Napi::Value Host::trampoline(const Napi::CallbackInfo& info) {
@@ -169,6 +233,7 @@ bool Host::runScript(const std::string& source, const std::string& filename) {
             ok = false;
         }
     }
+    pumpDispatch();
     pumpJobs();
     return ok;
 }
@@ -199,6 +264,7 @@ bool Host::callFrame(double timeMs, int frameNo) {
             ok = false;
         }
     }
+    pumpDispatch();
     pumpJobs();
     return ok;
 }

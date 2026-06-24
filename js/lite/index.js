@@ -55,6 +55,7 @@
     // Module load order: core + math first (others reference them at runtime).
     __bl_require("core.js");
     __bl_require("math.js");
+    __bl_require("net.js");
     __bl_require("engine.js");
     __bl_require("scene.js");
     __bl_require("camera.js");

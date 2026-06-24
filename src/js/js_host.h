@@ -21,6 +21,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <string>
 #include <vector>
@@ -57,11 +58,26 @@ public:
     // Drain the pending promise-continuation (microtask) queue.
     void pumpJobs();
 
+    // Drain async completions (e.g. XHR/HTTP downloads) that polyfills dispatch from
+    // background threads onto the JS thread. No-op unless a polyfill is enabled/active.
+    void pumpDispatch();
+
+    // True when the JsRuntime + polyfills (URL / XMLHttpRequest) were initialized, so the
+    // bootstrap can pump the dispatch queue while async asset loads are in flight.
+    bool polyfillsActive() const { return polyfillsActive_; }
+
     Napi::Env env() const { return env_; }
 
 private:
     void installConsole();
     static Napi::Value trampoline(const Napi::CallbackInfo& info);
+
+#if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)
+    void initializePolyfills();
+    std::mutex dispatchMutex_;
+    std::queue<std::function<void(Napi::Env)>> dispatchQueue_;  // async completions → JS thread
+#endif
+    bool polyfillsActive_ = false;
 
     void* runtime_ = nullptr;       // engine runtime handle (JsRuntimeHandle), opaque here
     Napi::Env env_{nullptr};        // napi_env attached to the engine's current context

@@ -228,7 +228,7 @@
         return n;
     }
 
-    BL.loadGltf = function (engine, url) {
+    function loadGltfSync(engine, url) {
         const u = String(url);
         const raw = __bl_readFile(u);
         if (!raw) { throw new Error("loadGltf: cannot read " + url); }
@@ -400,5 +400,25 @@
         // by nodeBase to match the native node graph.
         const animationGroups = parseAnimations(json, buffers, nodeBase);
         return Promise.resolve({ _kind: "container", _meshIds: meshIds, animationGroups: animationGroups });
+    }
+
+    // Public entry: download the glTF/GLB (and, for a .gltf, its external buffers + image
+    // files) over HTTP when they aren't on disk — using the URL polyfill to resolve the
+    // relative URIs against the document URL — then run the synchronous loader. With the
+    // polyfills off (or all assets local) the prefetch is a no-op.
+    BL.loadGltf = async function (engine, url) {
+        const u = String(url);
+        await BL.ensureCached(u);
+        if (/\.gltf(\?|#|$)/i.test(u)) {
+            const raw = __bl_readFile(u);
+            if (raw) {
+                const json = JSON.parse(BL.utf8Decode(new Uint8Array(raw)));
+                const pending = [];
+                (json.buffers || []).forEach(function (b) { if (b.uri) { pending.push(BL.ensureCached(BL.resolveUrl(b.uri, u))); } });
+                (json.images || []).forEach(function (im) { if (im.uri) { pending.push(BL.ensureCached(BL.resolveUrl(im.uri, u))); } });
+                await Promise.all(pending);
+            }
+        }
+        return loadGltfSync(engine, u);
     };
 })(globalThis.__BL);

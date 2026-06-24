@@ -89,6 +89,30 @@ to ship, and the engine is *not* statically linked into the `.exe`). Note the in
 Chakra is frozen at ~ES2017, so the host installs a small `globalThis` shim; the
 Babylon-Lite JS here avoids ES2019+ syntax (no `?.` / `??`).
 
+### Polyfills (browser-like globals, optional)
+
+JsRuntimeHost ships browser-like features as separate Node-API polyfill **static
+libraries**, each toggled at configure time — the same model Babylon Native uses. Two are
+wired here (both OFF by default to keep the minimal build lean):
+
+```powershell
+cmake -S . -B build-net -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DBL_POLYFILL_URL=ON -DBL_POLYFILL_XMLHTTPREQUEST=ON
+cmake --build build-net --target app
+```
+
+- `BL_POLYFILL_URL` — `URL` / `URLSearchParams`.
+- `BL_POLYFILL_XMLHTTPREQUEST` — `XMLHttpRequest` (HTTP; pulls JsRuntimeHost's `UrlLib`, a
+  native Win32 HTTP client — no curl).
+
+When enabled, **scenes download their assets over HTTP on demand**: `loadGltf` /
+`loadEnvironment` fetch a remote model/`.env` (and, for a `.gltf`, its external `.bin` +
+image files — resolved against the document URL via the URL polyfill) when they aren't on
+disk, caching them into `assets/` so later runs are offline. So a scene referencing
+`https://…/Foo.gltf` just works without pre-placing the files. Enabling the polyfills pulls
+the full JsRuntimeHost root (vs only its `napi` target); the default build is unchanged. See
+`../.ai/phase12-polyfills-http.md`.
+
 ## Run
 
 ```powershell
@@ -188,6 +212,12 @@ Chakra nearly halves the binary because the engine is the OS-provided DLL instea
   vertex buffer **before** GPU skinning, so the skinned+morphed scene5 Alien deforms
   correctly. Also: external glTF image files now load. ✅
   See `../.ai/phase11-morph-targets.md`.
+- **Phase 12** — **polyfill infrastructure + HTTP asset loading**: JsRuntimeHost polyfills
+  as separate static libraries toggled at configure time (`BL_POLYFILL_URL`,
+  `BL_POLYFILL_XMLHTTPREQUEST`), the Babylon Native model. With them on, the host creates a
+  `JsRuntime` + dispatcher and `loadGltf`/`loadEnvironment` **download remote assets over
+  HTTP** (URL-resolved, cached locally) so test assets needn't be on disk. ✅
+  See `../.ai/phase12-polyfills-http.md`.
 
 ## Environment maps / IBL (Phase 10)
 

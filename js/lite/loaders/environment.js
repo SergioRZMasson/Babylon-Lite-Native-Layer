@@ -31,7 +31,8 @@
         return out;
     }
 
-    BL.loadEnvironment = function (scene, url, options) {
+    BL.loadEnvironment = async function (scene, url, options) {
+        await BL.ensureCached(String(url));
         const raw = __bl_readFile(String(url));
         if (!raw) { return Promise.resolve(); } // no env file → keep hemispheric fallback
         const bytes = new Uint8Array(raw);
