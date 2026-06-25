@@ -70,6 +70,7 @@ public:
 
 private:
     void installConsole();
+    void installBrowserShims();
     static Napi::Value trampoline(const Napi::CallbackInfo& info);
 
 #if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)

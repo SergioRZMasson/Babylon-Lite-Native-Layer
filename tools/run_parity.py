@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run Babylon-Lite parity scenes in our native host and compare to the reference
 goldens. For each selected scene it:
-  1. runs app.exe --prelude js/lite/index.js --script js/tests/<slug>.js headless,
-     capturing a 1280x720 screenshot (the golden resolution),
+  1. runs app.exe --script js/dist/tests/<slug>.js headless (the self-contained scene
+     bundle produced by `node js/build.mjs`), capturing a 1280x720 screenshot,
   2. detects JS errors from the host's stderr,
   3. computes MAD vs reference/lite/<slug>/babylon-ref-golden.png when it exists.
 
+Build the bundles first: `node js/build.mjs` (or `cmake --build build`).
+
 Usage (from the Babylon-Lite-Native-Layer dir):
-  python tools/run_parity.py                 # supported scenes (per manifest)
+  python tools/run_parity.py                 # supported scenes (those that bundled)
   python tools/run_parity.py --filter golden # only scenes that have a local golden
   python tools/run_parity.py --filter all
   python tools/run_parity.py --ids 2,3,6,13,20,31,32
@@ -19,7 +21,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.dirname(HERE)
 LITE = os.path.abspath(os.path.join(NATIVE, "..", "Babylon-Lite"))
 APP = os.path.join(NATIVE, "build", "bin", "app.exe")
-PRELUDE = os.path.join("js", "lite", "index.js")
+# Parity scenes are now self-contained bundles produced by `node js/build.mjs` (the CMake
+# js_bundles target). They load standalone — no prelude.
+BUNDLE_DIR = os.path.join(NATIVE, "js", "dist", "tests")
 OUT_DIR = os.path.join(NATIVE, "build", "parity-out")
 W, H = 1280, 720
 
@@ -81,8 +85,8 @@ def run_scene(scene, frames, timeout):
     tga = os.path.join(OUT_DIR, f"{slug}.tga")
     if os.path.exists(tga):
         os.remove(tga)
-    script = os.path.join("js", "tests", f"{slug}.js")
-    cmd = [APP, "--prelude", PRELUDE, "--script", script, "--frames", str(frames),
+    script = os.path.join("js", "dist", "tests", f"{slug}.js")
+    cmd = [APP, "--script", script, "--frames", str(frames),
            "--screenshot", tga, "--warp", "--width", str(W), "--height", str(H)]
     res = {"id": scene["id"], "slug": slug, "status": "?", "mad": None, "coverage": None, "note": ""}
     try:
@@ -121,16 +125,22 @@ def main():
     ap.add_argument("--timeout", type=int, default=40)
     args = ap.parse_args()
 
-    manifest = json.load(open(os.path.join(NATIVE, "js", "tests", "manifest.json"), encoding="utf-8"))
+    # The "supported" set = parity scenes that bundled against our mirror (a bundle exists
+    # in js/dist/tests/). The scene list + golden slugs come from Babylon-Lite's scene-config.
+    cfg = json.load(open(os.path.join(LITE, "scene-config.json"), encoding="utf-8"))
+    bundled = set(f[:-3] for f in os.listdir(BUNDLE_DIR)) if os.path.isdir(BUNDLE_DIR) else set()
+    for s in cfg:
+        s["supported"] = s["slug"] in bundled
+        s["golden"] = os.path.exists(golden_path(s["slug"]))
     if args.ids:
         want = set(int(x) for x in args.ids.split(","))
-        scenes = [s for s in manifest if s["id"] in want]
+        scenes = [s for s in cfg if s["id"] in want]
     elif args.filter == "golden":
-        scenes = [s for s in manifest if s["golden"]]
+        scenes = [s for s in cfg if s["golden"] and s["supported"]]
     elif args.filter == "all":
-        scenes = manifest
+        scenes = cfg
     else:
-        scenes = [s for s in manifest if s["supported"]]
+        scenes = [s for s in cfg if s["supported"]]
 
     os.makedirs(OUT_DIR, exist_ok=True)
     if not os.path.exists(APP):

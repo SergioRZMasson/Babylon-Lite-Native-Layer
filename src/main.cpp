@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
 
     std::string scriptPath = cli.scriptPath;
     if (scriptPath.empty()) {
-        scriptPath = (fs::path(executableDir()) / "js" / "cube.js").string();
+        scriptPath = (fs::path(executableDir()) / "js" / "legacy" / "cube.js").string();
     }
     std::fprintf(stderr, "[main] loading script: %s (cpu=%s grid=%d)\n", scriptPath.c_str(), cli.cpu.c_str(), cli.grid);
     if (!host.runFile(scriptPath)) {

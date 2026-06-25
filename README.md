@@ -15,7 +15,7 @@ A Dawn-free native host that runs JavaScript orchestration on top of a native
   rendering library Babylon Native uses.
 - Exposes a tiny native rendering seam to JS (`gfx.createMesh`, `gfx.setCamera`,
   `gfx.drawMesh`, `gfx.setClearColor`).
-- Loads `js/cube.js`, which builds a cube (geometry + camera + a per-frame spin
+- Loads `js/legacy/cube.js`, which builds a cube (geometry + camera + a per-frame spin
   matrix, all in JS) and calls into `gfx.*` each frame. C++ owns the render loop
   and the GPU work.
 - The cube is shaded with the **Standard material** shader **hand-ported from
@@ -43,27 +43,35 @@ shaders/
   vs_cube.sc / fs_cube.sc      Standard material (hemispheric), ported from WGSL
   vs_pbr.sc  / fs_pbr.sc       glTF metallic-roughness PBR (Cook-Torrance)
   varying.def.sc / varying_pbr.def.sc
-js/
-  lite/               thin Babylon-Lite API mirror, modular (mirrors Lite's package layout):
-    index.js          bootstrap (shims + __bl_require + install public API)
-    core.js math.js engine.js scene.js camera.js light.js mesh.js material.js
-    loaders/gltf.js   JS glTF/GLB parser (mirrors loader-gltf) → __bl_* data seam
-    loaders/environment.js (stub)
-  lite-demo.js        consumer-style primitives scene (Phase 3)
-  lite-boombox.js     scene1-style glTF PBR scene (Phase 4)
-  cube.js / stress.js / main.js   Phase 0–2A demos
+js/                   TypeScript project (the Babylon-Lite API mirror + scene entries):
+  package.json tsconfig.json build.mjs   esbuild bundler (one self-contained JS per scene)
+  src/babylon-lite/   thin Babylon-Lite API mirror as tree-shakable TS modules (mirrors
+                      Lite's package layout): index.ts (public exports), internal.ts, math.ts,
+                      net.ts, engine.ts, scene.ts, camera.ts, light.ts, mesh.ts, material.ts,
+                      texture.ts, animation.ts, loaders/{gltf,environment}.ts, native.d.ts
+                      (ambient __bl_* seam + host globals). Every export forwards to C++.
+  src/scenes/         scene entry points (.ts) that `import { ... } from "babylon-lite"`:
+                      lite-boombox, lite-demo, anim-{boxanimated,cesiumman,fox},
+                      demo-littlest-tokyo, bench-scene200
+  dist/               bundled output (gitignored): one standalone <name>.js per scene, plus
+                      tests/<slug>.js (the Babylon-Lite parity scenes that build against the
+                      mirror). Copied to <build>/bin/js by the CMake js_bundles target.
+  legacy/             cube.js / stress.js / main.js — Phase 0–2A harness demos (native
+                      gfx/task-graph API, not the lite mirror)
 assets/
   BoomBox.glb         glTF model (downloaded from the Babylon playground CDN)
 ```
 
 **Architecture split:** JS owns app logic + asset loading (glTF parsing mirrors
 Babylon-Lite's `loader-gltf`); C++ owns the render loop + rendering commands (mesh/texture/
-material creation + bgfx draw). No WebGPU; no cgltf.
+material creation + bgfx draw). No WebGPU; no cgltf. The JS is authored in **TypeScript**,
+packaged like Babylon-Lite (ESM + esbuild, tree-shaking + minify for the smallest bundle),
+and each scene is compiled to a **self-contained** JS the native host loads standalone.
 
 ## Build (Windows, x64)
 
-Requires Visual Studio 2022, CMake, Ninja. From a *Developer* shell (or call
-`vcvars64.bat` first):
+Requires Visual Studio 2022, CMake, Ninja, and **Node.js** (for bundling the TypeScript
+scenes). From a *Developer* shell (or call `vcvars64.bat` first):
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -72,8 +80,16 @@ cmake --build build --target app
 
 The first configure clones bgfx (BabylonJS fork, pinned to Babylon Native's tag) and
 JsRuntimeHost (Node-API + the URL/XMLHttpRequest polyfills + `UrlLib`, all pinned to the
-commit Babylon Native uses). The first build also compiles bgfx's `shaderc` (slow,
-one-time). The standard build includes the HTTP polyfills (see below).
+commit Babylon Native uses), and runs `npm install` in `js/` (installs esbuild). The first
+build also compiles bgfx's `shaderc` (slow, one-time). The standard build includes the HTTP
+polyfills (see below).
+
+Every build also runs the **`js_bundles`** target: `node js/build.mjs` bundles each
+TypeScript scene with esbuild (tree-shaking the API mirror to just what the scene uses +
+minifying) into a self-contained `js/dist/<name>.js`, then copies the bundles to
+`build/bin/js/`. (Bundle the scenes alone any time with `node js/build.mjs`, or typecheck
+the project with `npm --prefix js run typecheck`.) See the *TypeScript scenes & bundling*
+section below.
 
 ### JS engine selection
 
@@ -123,7 +139,7 @@ cmake --build build-min --target app
 build/bin/app.exe
 
 # Live perf scene with an on-screen FPS overlay (windowed; close the window to exit):
-build/bin/app.exe --prelude js/lite/index.js --script js/bench/scene200.js --no-vsync
+build/bin/app.exe --script js/dist/bench-scene200.js --no-vsync
 #   - omit --no-vsync to see the vsync-capped (display refresh) rate
 #   - the overlay shows FPS / ms-per-frame / draw count; FPS also prints to the console
 #   - --show-fps forces the overlay on for any scene
@@ -141,6 +157,39 @@ flip) to view it right-side up.
 (produced by the build into `build/bin/shaders/`), and the `js/` + `assets/` folders
 are staged next to the exe. When deploying, ship `app.exe` together with its
 `shaders/`, `js/`, and `assets/` folders.
+
+## TypeScript scenes & bundling
+
+The `js/` folder is a **TypeScript project**, packaged like Babylon-Lite itself (ESM source
++ esbuild, tree-shaking + minify for the smallest bundle) — but the API implementation
+forwards to the native C++ engine instead of WebGPU.
+
+- `src/babylon-lite/` is the **API mirror**: tree-shakable TS modules that re-create the
+  `@babylonjs/lite` public surface (`createEngine`, `createSceneContext`, `loadGltf`,
+  `loadEnvironment`, `createPbrMaterial`, `playAnimation`, …). Every export forwards to a
+  `__bl_*` native function (declared ambient in `native.d.ts`). A scene `import { ... } from
+  "babylon-lite"` resolves here.
+- `src/scenes/*.ts` are the **scene entry points**, written exactly like Babylon-Lite web
+  scenes.
+- `node js/build.mjs` bundles **each** scene into a **self-contained** `js/dist/<name>.js`:
+  esbuild inlines only the API the scene actually imports (tree-shaken) + the scene code,
+  minified, downlevelled to the in-box Chakra ES2017 ceiling, as a classic IIFE the host
+  loads standalone (no prelude). Tree-shaking is real: `lite-demo.js` (primitives) ≈ 6 KB vs
+  `lite-boombox.js` (glTF + IBL) ≈ 16 KB.
+- The build also bundles the **Babylon-Lite parity scenes** (`lab/lite/src/lite/sceneN.ts`)
+  with `"babylon-lite"` aliased to the mirror → `js/dist/tests/<slug>.js`. Scenes whose APIs
+  the mirror implements bundle; the rest are reported as unsupported (skipped). The
+  CMake `js_bundles` target copies all bundles to `build/bin/js`.
+
+```powershell
+node js/build.mjs                 # bundle all scenes (demos + parity tests)
+node js/build.mjs --scenes-only   # just src/scenes/*.ts
+npm --prefix js run typecheck     # tsc --noEmit over the project
+```
+
+Run a scene by pointing `--script` at its bundle (no `--prelude`): the host installs the
+browser-like globals (`document`/`window`/`performance`, and `URL`/`URLSearchParams` via the
+polyfill) so the self-contained bundle runs unchanged.
 
 ## Size-optimized build
 
@@ -194,7 +243,7 @@ See `../.ai/phase6-napi-engine-abstraction.md` and `../.ai/phase12-polyfills-htt
   static QuickJS to the in-box **Chakra** (−43–48% `.exe`). ✅ See
   `../.ai/phase6-napi-engine-abstraction.md`.
 - **Phase 7** — **parity-scene run + compare framework**: all 199 Babylon-Lite parity
-  scenes translated to runnable JS (`js/tests/`), a manifest categorizing each by
+  parity scenes bundled to runnable JS (`js/dist/tests/`), a manifest categorizing each by
   required API, and a runner that renders each headless and computes MAD vs the
   reference goldens. First feature batch (directional/point/spot lights, fog hook,
   solid textures, `onBeforeRender`, tuple colors) lands procedural scenes. ✅ See
@@ -226,9 +275,18 @@ See `../.ai/phase6-napi-engine-abstraction.md` and `../.ai/phase12-polyfills-htt
   HTTP** (URL-resolved, cached locally) so test assets needn't be on disk. ✅
   See `../.ai/phase12-polyfills-http.md`.
 - **Phase 13** — **Littlest Tokyo demo + single build**: the animated diorama
-  (`js/demo-littlest-tokyo.js`, 71 meshes, skin + node animation, PBR/IBL, PNG+JPEG)
+  (`src/scenes/demo-littlest-tokyo.ts`, 71 meshes, skin + node animation, PBR/IBL, PNG+JPEG)
   renders natively; the polyfills are now **on by default** so there's one standard build
   (the old size-opt `build-min` is opt-in via flags). ✅
+- **Phase 14** — **PBR/IBL fidelity fix**: env-lit PBR was too shiny; the IBL specular path
+  now matches Babylon-Lite (specular LOD `log2(cubemapDim·alphaG)·lodScale`, specular + horizon
+  occlusion, Babylon's exponential tonemap + contrast, dielectric albedo factor). BoomBox
+  plastic is matte again. ✅
+- **Phase 15** — **TypeScript JS project + self-contained scene bundles**: `js/` is now a
+  TypeScript project packaged like Babylon-Lite (`src/babylon-lite/` API mirror +
+  `src/scenes/*.ts`). `node js/build.mjs` (run automatically by the `js_bundles` CMake target)
+  bundles each scene with esbuild into a minified, tree-shaken, **self-contained** IIFE in
+  `js/dist/` that the host loads with **no `--prelude`**. ✅
 
 ## Environment maps / IBL (Phase 10)
 
@@ -245,7 +303,7 @@ previous hemispheric + Reinhard path unchanged.
 
 ```bat
 :: BoomBox lit by environmentSpecular.env (headless: add --frames 3 --screenshot out.tga)
-build\bin\app.exe --prelude js\lite\index.js --script js\lite-boombox.js
+build\bin\app.exe --script js\dist\lite-boombox.js
 ```
 
 Gaps toward strict parity: skybox/ground background not drawn, `loadHdrEnvironment`
@@ -261,11 +319,11 @@ skins) computes the bone palette for GPU skinning each frame.
 
 ```powershell
 # Node (TRS) animation — a box hierarchy that moves/rotates:
-build/bin/app.exe --prelude js/lite/index.js --script js/anim-boxanimated.js --show-fps
+build/bin/app.exe --script js/dist/anim-boxanimated.js --show-fps
 
 # Skeletal animation (GPU skinning) — a walking figure / a fox:
-build/bin/app.exe --prelude js/lite/index.js --script js/anim-cesiumman.js --show-fps
-build/bin/app.exe --prelude js/lite/index.js --script js/anim-fox.js --show-fps
+build/bin/app.exe --script js/dist/anim-cesiumman.js --show-fps
+build/bin/app.exe --script js/dist/anim-fox.js --show-fps
 ```
 
 Animated/skinned glTF assets live in `assets/` (BoxAnimated, CesiumMan, Fox GLBs +
@@ -284,7 +342,7 @@ non-skinned morph meshes alike.
 
 ```powershell
 # Scene 5 — Alien: a skinned + morph-target bust (facial blend + head motion):
-build/bin/app.exe --prelude js/lite/index.js --script js/tests/scene5-alien.js --show-fps
+build/bin/app.exe --script js/dist/tests/scene5-alien.js --show-fps
 ```
 
 The Alien is a larger model downloaded from the playground CDN (like the GLBs, it is
@@ -302,12 +360,12 @@ GLB-embedded textures, so the Alien's separate PNG maps render.
 
 ## Demos
 
-`js/demo-*.js` are showcase scenes (vs the `js/tests/` parity scenes). **Littlest Tokyo** —
+`src/scenes/demo-*.ts` are showcase scenes (vs the `js/dist/tests/` parity scenes). **Littlest Tokyo** —
 Glen Fox's animated diorama (71 meshes, skinned + node animation, PBR + IBL, PNG/JPEG
 textures) — exercises most of the engine at once:
 
 ```powershell
-build/bin/app.exe --prelude js/lite/index.js --script js/demo-littlest-tokyo.js --show-fps
+build/bin/app.exe --script js/dist/demo-littlest-tokyo.js --show-fps
 ```
 
 The model is large (~10 MB) and lives in the Babylon-Lite repo (no public CDN URL), so copy
@@ -332,7 +390,7 @@ cmake --build build --target app
 node tools/bench/run-bench.mjs --frames 600        # --no-open to skip the browser
 ```
 
-The app renders `js/bench/scene200.js` (the thin-instance stress workload) with vsync
+The app renders `js/dist/bench-scene200.js` (the thin-instance stress workload) with vsync
 off, drops the first frame as warmup, and prints one `BENCH …` line; the runner parses
 it into min/avg/p95/max ms + **FPS = 1000/avg_ms**, writing
 `tools/bench/out/bench-report.html`. It also **auto-discovers and runs Cedric's DawnTest
@@ -347,62 +405,58 @@ lists his published reference numbers as clearly-tagged cross-machine baselines.
 
 ## Parity test framework (Phase 7)
 
-Run Babylon-Lite's parity scenes in the native host and compare to the reference
-goldens. Tooling lives in `tools/`; the JS scene equivalents in `js/tests/`.
+Run Babylon-Lite's parity scenes in the native host and compare to the reference goldens.
+The parity scenes are now bundled straight from Babylon-Lite's own
+`lab/lite/src/lite/sceneN.ts` (with `"babylon-lite"` aliased to our mirror) by
+`node js/build.mjs` → `js/dist/tests/<slug>.js`; the runner loads each bundle standalone.
 
 ```powershell
-# 1. (once) install esbuild for the translator
-npm install --no-save esbuild
+# 1. bundle the scenes (also done by `cmake --build build`)
+node js/build.mjs
 
-# 2. translate every lab/lite/src/lite/sceneN.ts -> js/tests/<slug>.js (ES2017)
-node tools/translate_scenes.mjs
-
-# 3. categorize all scenes -> js/tests/manifest.json (id, tags, golden?, missing API)
-python tools/gen_manifest.py
-
-# 4. run + compare (needs Pillow): app.exe per scene, screenshot @1280x720, MAD vs golden
+# 2. run + compare (needs Pillow): app.exe per bundled scene, screenshot @1280x720, MAD vs golden
 python tools/run_parity.py --filter supported     # or: --filter golden | all | --ids 2,3,6
 ```
 
-Outcome per scene: `compared` (MAD reported), `rendered` (content, no local golden),
-`blank`, `js-error` (unsupported API — message captured), `timeout`. The report is
-written to `build/parity-out/report.json`. **Status:** 199/199 translate + run; the
-first feature batch renders the procedural/standard scenes (sphere, fog boxes, emissive
-grid of 2500 spheres, spotlights). The long tail errors on subsystems not yet built
-(NME, sprites, physics, shadows, gaussian splatting, navigation, animation, gizmos) —
-the manifest's `missingApi` prioritizes them.
+`run_parity.py` treats the scenes that bundled (those whose APIs the mirror implements) as
+the *supported* set. Outcome per scene: `compared` (MAD reported), `rendered` (content, no
+local golden), `blank`, `js-error`, `timeout`. The report is written to
+`build/parity-out/report.json`. Of Babylon-Lite's 199 parity scenes, the ones using the
+implemented core (glTF/PBR/IBL, animation+skin+morph, primitives, standard + PBR materials,
+lights) bundle + render; the rest depend on subsystems not yet built (NME, sprites, physics,
+shadows, gaussian splatting, navigation, post-processing) and are skipped at bundle time.
 
 ## Phase 4: glTF + PBR (BoomBox)
 
 ```powershell
 # Load + render a glTF PBR model (BoomBox) through the native engine:
-build/bin/app.exe --prelude js/lite/index.js --script js/lite-boombox.js
+build/bin/app.exe --script js/dist/lite-boombox.js
 # headless: add --frames 12 --screenshot out.tga
 ```
 
 ## Phase 3: Babylon-Lite API mirror (the headline feature)
 
-`js/lite/index.js` mirrors the public Babylon-Lite API as a **thin** JS proxy layer;
+`src/babylon-lite/` mirrors the public Babylon-Lite API as a **thin** TypeScript proxy layer;
 `src/lite.{h,cpp}` is the native engine (scene graph, hierarchy, materials, camera,
-light, geometry, traversal, culling, draw). `js/lite-demo.js` is consumer-style code
+light, geometry, traversal, culling, draw). `src/scenes/lite-demo.ts` is consumer-style code
 that looks exactly like a Babylon-Lite web scene.
 
 ```powershell
 # Render a Babylon-Lite-style scene through the native engine:
-build/bin/app.exe --prelude js/lite/index.js --script js/lite-demo.js
+build/bin/app.exe --script js/dist/lite-demo.js
 # headless: add --frames 6 --screenshot out.tga
 ```
 
 ## Phase 2A: task-graph stress benchmark
 
-`js/stress.js` builds a grid of spinning cubes and runs the per-frame work either in
+`js/legacy/stress.js` builds a grid of spinning cubes and runs the per-frame work either in
 the **native** task-graph executor (`src/scene.{h,cpp}`) or in **JS** (the no-JIT
 baseline). Both render identically; only where the CPU scene-walk runs differs.
 
 ```powershell
 # 6400 cubes, 200 frames, uncapped — prints a BENCH line (cpu_traverse_ms, avg_ms, fps):
-build/bin/app.exe --script js/stress.js --cpu native --grid 80 --frames 200
-build/bin/app.exe --script js/stress.js --cpu js     --grid 80 --frames 200
+build/bin/app.exe --script js/legacy/stress.js --cpu native --grid 80 --frames 200
+build/bin/app.exe --script js/legacy/stress.js --cpu js     --grid 80 --frames 200
 ```
 
 | Flag | Meaning |

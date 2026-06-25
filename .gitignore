@@ -3,6 +3,11 @@
 /build-min/
 /build-poly/
 
+# TypeScript bundler: dependencies + generated bundles (produced by `node js/build.mjs`,
+# copied to <build>/bin/js by the CMake js_bundles target).
+js/node_modules/
+js/dist/
+
 # Scratch verification artifacts
 *.tga
 *.png

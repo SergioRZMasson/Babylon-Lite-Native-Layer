@@ -5,7 +5,7 @@
 // prints one `BENCH …` line on exit, and we aggregate min/avg/max/p95 ms + FPS
 // (= 1000 / avg_ms) into a console table + JSON + a self-contained HTML report.
 //
-// It runs OUR app on js/bench/scene200.js, and — if you've also built them on this
+// It runs OUR app on the js/dist/bench-scene200.js bundle, and — if you've also built them on this
 // machine — auto-discovers and runs Cedric's DawnTest (Samples/webgpu-cross-platform-app
 // build-*/app.exe) and the BabylonNative Playground for a true same-hardware side-by-side.
 // Cedric's published reference numbers (Perf/Cedric.md) are always included as baseline
@@ -85,7 +85,7 @@ function discoverNativeLite() {
             id: `nativelite-${engine}-${gfx}${bd === "build-min" ? "-min" : ""}`,
             app: "NativeLite", engine, gfx, exe,
             cwd: NATIVE,
-            args: ["--prelude", "js/lite/index.js", "--script", "js/bench/scene200.js",
+            args: ["--script", "js/dist/bench-scene200.js",
                    "--scene-name", "scene200", "--frames", String(opts.frames),
                    "--no-vsync", "--width", String(opts.width), "--height", String(opts.height)],
         });

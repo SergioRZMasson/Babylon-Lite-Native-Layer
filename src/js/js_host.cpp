@@ -99,6 +99,8 @@ bool Host::initialize() {
     initializePolyfills();
 #endif
 
+    installBrowserShims();
+
     // setFrameCallback(fn): JS registers its per-frame function here.
     registerFunction("setFrameCallback", [this](const Napi::CallbackInfo& info) -> Napi::Value {
         if (info.Length() >= 1 && info[0].IsFunction()) {
@@ -135,6 +137,60 @@ void Host::installConsole() {
     console.Set("error", logFn);
     console.Set("debug", logFn);
     env_.Global().Set("console", console);
+}
+
+void Host::installBrowserShims() {
+    // Minimal browser-like globals so self-contained scene bundles (which are written like
+    // web scenes: document.getElementById, window.location, performance.now,
+    // URLSearchParams) run unchanged without a separate JS prelude. Installed once at host
+    // startup. URLSearchParams is only shimmed when absent — the URL polyfill (default ON)
+    // provides the real one, which wins. Evaluated as a classic script.
+    static const char* kShim = R"JS(
+(function (g) {
+    if (typeof g.globalThis === "undefined") { g.globalThis = g; }
+    if (typeof g.window === "undefined") { g.window = g; }
+    if (typeof g.window.location === "undefined") { g.window.location = { search: "", href: "", pathname: "/" }; }
+    if (typeof g.document === "undefined") {
+        g.document = {
+            getElementById: function () {
+                return {
+                    _kind: "canvas", width: 0, height: 0, dataset: {},
+                    getContext: function () { return null; },
+                    addEventListener: function () {}, removeEventListener: function () {},
+                    getBoundingClientRect: function () { return { width: 0, height: 0, left: 0, top: 0 }; },
+                    setAttribute: function () {}, style: {},
+                };
+            },
+        };
+    }
+    if (typeof g.performance === "undefined") {
+        var _t0 = Date.now();
+        g.performance = { now: function () { return Date.now() - _t0; } };
+    }
+    if (typeof g.URLSearchParams === "undefined") {
+        g.URLSearchParams = function (q) {
+            var map = {};
+            if (q) {
+                if (q.charAt(0) === "?") { q = q.slice(1); }
+                var parts = q.split("&");
+                for (var i = 0; i < parts.length; i++) {
+                    if (!parts[i]) { continue; }
+                    var kv = parts[i].split("=");
+                    map[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || "");
+                }
+            }
+            this.get = function (k) { return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null; };
+            this.has = function (k) { return Object.prototype.hasOwnProperty.call(map, k); };
+        };
+    }
+})(globalThis);
+)JS";
+    Napi::HandleScope scope(env_);
+    try {
+        Napi::Eval(env_, kShim, "<browser-shims>");
+    } catch (const Napi::Error& e) {
+        std::fprintf(stderr, "[js] browser-shim install failed: %s\n", e.what());
+    }
 }
 
 #if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)

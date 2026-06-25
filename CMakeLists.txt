@@ -202,19 +202,52 @@ endif()
 set_target_properties(app PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# Stage js/ (and assets/ if present) next to the executable. Use an ALL custom target
-# with no byproducts so it re-runs on EVERY `cmake --build` — keeping the staged copy in
-# sync even when only JS files changed (which doesn't relink the app). NOTE: pure JS
-# edits still require re-running this (or just run the app from the project root, where
-# js/ and assets/ are the live source).
-set(STAGE_CMDS
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/js" "${CMAKE_BINARY_DIR}/bin/js")
+# ---------------------------------------------------------------------------
+# JavaScript: bundle the TypeScript scenes into self-contained JS and stage them
+# (+ assets) next to the executable.
+#
+# The `js/` folder is a TypeScript project (the Babylon-Lite API mirror + scene entry
+# points). `node js/build.mjs` bundles each scene with esbuild — tree-shaking the mirror
+# down to just what the scene uses + minifying — into `js/dist/<name>.js` (and the parity
+# tests into `js/dist/tests/`). Each output is a SELF-CONTAINED classic script the host
+# loads standalone (no separate prelude). The bundles are then copied to `bin/js/`.
+# ---------------------------------------------------------------------------
+set_target_properties(app PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+find_program(NODE_EXECUTABLE NAMES node)
+find_program(NPM_EXECUTABLE NAMES npm npm.cmd)
+set(JS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/js")
+
+# Stage assets next to the exe (if present).
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
-    list(APPEND STAGE_CMDS
+    add_custom_target(stage_assets ALL
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${CMAKE_BINARY_DIR}/bin/assets")
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${CMAKE_BINARY_DIR}/bin/assets"
+        COMMENT "Staging assets/ next to app.exe")
+    add_dependencies(stage_assets app)
 endif()
-add_custom_target(stage_runtime ALL ${STAGE_CMDS}
-    COMMENT "Staging js/ + assets/ next to app.exe")
-add_dependencies(stage_runtime app)
+
+if(NODE_EXECUTABLE)
+    # Install the bundler's dev dependency (esbuild) once, at configure time, if missing.
+    if(NOT EXISTS "${JS_DIR}/node_modules" AND NPM_EXECUTABLE)
+        message(STATUS "Installing JS bundler dependencies (npm install in js/)...")
+        execute_process(COMMAND "${NPM_EXECUTABLE}" install --no-audit --no-fund
+            WORKING_DIRECTORY "${JS_DIR}" RESULT_VARIABLE _npm_res)
+        if(NOT _npm_res EQUAL 0)
+            message(WARNING "npm install failed (${_npm_res}); scene bundles may not build.")
+        endif()
+    endif()
+    # Bundle every build (esbuild is fast) so the staged JS stays in sync with TS edits,
+    # then copy the bundles next to the exe. No byproducts → runs on every `cmake --build`.
+    add_custom_target(js_bundles ALL
+        COMMAND "${NODE_EXECUTABLE}" "${JS_DIR}/build.mjs"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${JS_DIR}/dist" "${CMAKE_BINARY_DIR}/bin/js"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${JS_DIR}/legacy" "${CMAKE_BINARY_DIR}/bin/js/legacy"
+        WORKING_DIRECTORY "${JS_DIR}"
+        COMMENT "Bundling TypeScript scenes (esbuild) → bin/js")
+    add_dependencies(js_bundles app)
+else()
+    message(WARNING "node not found: skipping TypeScript scene bundling. Install Node.js "
+                    "and re-configure, or run `node js/build.mjs` manually, to produce bin/js.")
+endif()
