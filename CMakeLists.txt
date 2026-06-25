@@ -28,8 +28,10 @@ endif()
 include(FetchContent)
 
 # ---------------------------------------------------------------------------
-# bgfx (BabylonJS fork, pinned to the same tag Babylon Native uses so we render
-# "the same way Babylon Native does"). D3D12 backend only.
+# bgfx (pinned to SergioRZMasson/bgfx.cmake @ sergio/size-trims-2026, which bumps the bgfx /
+# bimg / bx submodules to current upstream so the binary-size config knobs below exist:
+# BGFX_CONFIG_C99_API, BGFX_CONFIG_VIDEO, BGFX_PLATFORM_SUPPORTS_<LANG>, and PR #3781's
+# "reduce binary size when features are not used"). D3D12 backend only.
 # ---------------------------------------------------------------------------
 set(BGFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BGFX_BUILD_TOOLS ON CACHE BOOL "" FORCE)              # need shaderc to compile .sc shaders
@@ -43,8 +45,8 @@ set(BGFX_INSTALL OFF CACHE BOOL "" FORCE)
 set(BGFX_USE_DEBUG_SUFFIX OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(bgfx_cmake
-    GIT_REPOSITORY https://github.com/BabylonJS/bgfx.cmake.git
-    GIT_TAG be578c80f6c1c1e4d2b5baa163bd452f1d3b88fa)
+    GIT_REPOSITORY https://github.com/SergioRZMasson/bgfx.cmake.git
+    GIT_TAG 96d109754035435eeeca8767111233bae62cd317)  # sergio/size-trims-2026
 FetchContent_MakeAvailable(bgfx_cmake)
 
 # D3D12-ONLY: compile just the Direct3D12 renderer into bgfx and drop every other backend
@@ -62,6 +64,24 @@ target_compile_definitions(bgfx PRIVATE
     BGFX_CONFIG_RENDERER_GNM=0
     BGFX_CONFIG_RENDERER_NVN=0
     BGFX_CONFIG_RENDERER_AGC=0)
+
+# Additional bgfx size trims (need the bumped upstream bgfx above) — all perf-neutral:
+#  - C99_API=0: drop the ~67 KB auto-generated bgfx.idl.inl C99 wrappers (we use the C++ API).
+#  - VIDEO=0:   drop the D3D11/12 hardware video decoder + its YUV->RGB compute shader.
+#  - BGFX_PLATFORM_SUPPORTS_<LANG>=0 for every shader language except DXBC (our D3D12 target),
+#    dropping the embedded DXIL/ESSL/GLSL/METAL/SPIRV/WGSL shader byte arrays.
+target_compile_definitions(bgfx PRIVATE
+    BGFX_CONFIG_C99_API=0
+    BGFX_CONFIG_VIDEO=0
+    BGFX_PLATFORM_SUPPORTS_DXBC=1
+    BGFX_PLATFORM_SUPPORTS_DXIL=0
+    BGFX_PLATFORM_SUPPORTS_ESSL=0
+    BGFX_PLATFORM_SUPPORTS_GLSL=0
+    BGFX_PLATFORM_SUPPORTS_METAL=0
+    BGFX_PLATFORM_SUPPORTS_NVN=0
+    BGFX_PLATFORM_SUPPORTS_PSSL=0
+    BGFX_PLATFORM_SUPPORTS_SPIRV=0
+    BGFX_PLATFORM_SUPPORTS_WGSL=0)
 
 # ---------------------------------------------------------------------------
 # JS engine via Node-API (node-addon-api). The native seam is written against the
