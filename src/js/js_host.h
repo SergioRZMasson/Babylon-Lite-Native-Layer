@@ -85,6 +85,13 @@ private:
     Napi::FunctionReference frameCallback_;
     std::vector<std::unique_ptr<NativeFn>> fns_;  // keep native callbacks alive for the env
     std::queue<void*> microtasks_;  // queued promise continuations (JsValueRef), opaque here
+
+    // V8 engine state (opaque void* so the header stays engine-agnostic; unused/null in the
+    // Chakra build). The isolate + context are entered for the host's lifetime and the napi
+    // env persists the context; pumpJobs drains the V8 message loop + microtask checkpoint.
+    void* isolate_ = nullptr;             // v8::Isolate*
+    void* contextGlobal_ = nullptr;       // v8::Global<v8::Context>*
+    void* arrayBufferAllocator_ = nullptr; // v8::ArrayBuffer::Allocator*
 };
 
 } // namespace js

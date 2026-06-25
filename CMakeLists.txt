@@ -48,8 +48,9 @@ FetchContent_Declare(bgfx_cmake
     GIT_TAG be578c80f6c1c1e4d2b5baa163bd452f1d3b88fa)
 FetchContent_MakeAvailable(bgfx_cmake)
 
-# Force the D3D11 renderer on (mirrors BabylonNative/Dependencies/CMakeLists.txt).
-target_compile_definitions(bgfx PRIVATE BGFX_CONFIG_RENDERER_DIRECT3D11=1)
+# Enable the D3D11 + D3D12 renderers (selected at runtime; the benchmark uses D3D12 via
+# --d3d12). Defining one BGFX_CONFIG_RENDERER_* turns the rest off, so enable both we use.
+target_compile_definitions(bgfx PRIVATE BGFX_CONFIG_RENDERER_DIRECT3D11=1 BGFX_CONFIG_RENDERER_DIRECT3D12=1)
 
 # Size build: compile ONLY the D3D11 renderer into bgfx (drop GL/GLES/D3D12/Vulkan/
 # Metal/WebGPU/etc. code paths entirely).
@@ -189,6 +190,13 @@ target_include_directories(app PRIVATE src src/js src/third_party)
 target_link_libraries(app PRIVATE bgfx bx bimg napi)
 target_compile_definitions(app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
     BL_JS_ENGINE="${JS_ENGINE}")
+# Boolean engine selector so the host (src/js/js_host.cpp) compiles the right bootstrap
+# (V8 platform/isolate/context vs Chakra JSRT runtime).
+if(JS_ENGINE STREQUAL "V8")
+    target_compile_definitions(app PRIVATE BL_JS_ENGINE_V8)
+else()
+    target_compile_definitions(app PRIVATE BL_JS_ENGINE_CHAKRA)
+endif()
 
 # Optional polyfill static libraries (JsRuntimeHost). Each links JsRuntime transitively;
 # the host (src/js/js_host.cpp) gates its Initialize() calls on the same macros.
@@ -203,6 +211,25 @@ endif()
 
 set_target_properties(app PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# When building against V8 (the benchmark engine), the V8 runtime ships as redistributable
+# DLLs + icudtl.dat that must sit next to app.exe. JsRuntimeHost downloads them into the
+# build's NuGet/ dir; the imported `v8::*` targets aren't visible at this scope, so copy the
+# redist files (globbed) next to the exe after each build so the app is self-contained.
+if(JS_ENGINE STREQUAL "V8")
+    file(GLOB _v8_redist_dirs "${CMAKE_BINARY_DIR}/NuGet/packages/v8.redist-v143-*/lib/Release")
+    if(_v8_redist_dirs)
+        list(GET _v8_redist_dirs 0 _v8_redist_dir)
+        file(GLOB _v8_redist_files "${_v8_redist_dir}/*.dll" "${_v8_redist_dir}/icudtl.dat")
+        foreach(_f ${_v8_redist_files})
+            add_custom_command(TARGET app POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_f}" "$<TARGET_FILE_DIR:app>"
+                COMMENT "Staging V8 redist next to app.exe")
+        endforeach()
+    else()
+        message(WARNING "V8 redist dir not found under ${CMAKE_BINARY_DIR}/NuGet; v8.dll/icudtl.dat won't be staged.")
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # JavaScript: bundle the TypeScript scenes into self-contained JS and stage them

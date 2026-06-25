@@ -70,6 +70,7 @@ struct Args {
     bool warp = false;
     bool bench = false;
     bool noVsync = false;  // present-immediate / drop BGFX_RESET_VSYNC (pure throughput)
+    bool d3d12 = false;    // use the Direct3D12 backend (benchmark target) instead of D3D11
     bool showFps = false;  // live on-screen FPS overlay (default on in windowed mode)
     int grid = 0;          // 0 = let the script choose
     std::string cpu = "native";
@@ -92,6 +93,8 @@ Args parseArgs(int argc, char** argv) {
             a.height = std::atoi(argv[++i]);
         } else if (s == "--warp") {
             a.warp = true;
+        } else if (s == "--d3d12") {
+            a.d3d12 = true;
         } else if (s == "--bench") {
             a.bench = true;
         } else if (s == "--no-vsync") {
@@ -195,7 +198,7 @@ int main(int argc, char** argv) {
     const uint32_t resetFlags = cli.bench ? BGFX_RESET_NONE : BGFX_RESET_VSYNC;
     BgfxCallback callback;
     bgfx::Init init;
-    init.type = bgfx::RendererType::Direct3D11;
+    init.type = cli.d3d12 ? bgfx::RendererType::Direct3D12 : bgfx::RendererType::Direct3D11;
     init.platformData.nwh = window.hwnd();
     init.resolution.width = uint32_t(fbW);
     init.resolution.height = uint32_t(fbH);
@@ -334,6 +337,9 @@ int main(int argc, char** argv) {
 
     bench::FrameTimer timer;
     if (cli.frames > 0) { timer.reserve(size_t(cli.frames)); }
+    // Total render span: wall time from the start of the first frame to the end of the last
+    // (Cedric's "time to render" metric). ms/frame = total / frames.
+    double renderStartMs = 0.0, renderEndMs = 0.0;
 
     // Live FPS overlay: shown on-screen (bgfx debug text) + printed to the console once
     // per second. On by default in windowed mode (no --frames); force with --show-fps.
@@ -351,6 +357,7 @@ int main(int argc, char** argv) {
             bgfx::reset(uint32_t(fbW), uint32_t(fbH), resetFlags);
             resized = false;
         }
+        if (frameNo == 0) { renderStartMs = bench::monotonicMillis(); }
         timer.startFrame();
 
         // Wall-clock frame delta (full loop incl. present/vsync) for the live FPS readout.
@@ -415,6 +422,7 @@ int main(int argc, char** argv) {
         }
 
         bgfx::frame();
+        renderEndMs = bench::monotonicMillis();
         timer.endFrame();
         ++frameNo;
 
@@ -427,13 +435,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[main] shutting down (rendered %d frames, visible=%d)\n", frameNo, world.lastVisible());
     if (cli.bench) {
         // BENCH line (stdout) in the DawnTest sample's format so Cedric's runner — and
-        // ours — parse our numbers identically. `extra` carries our engine/gfx labels +
-        // a convenience fps (the runner also derives fps = 1000/avg_ms).
+        // ours — parse our numbers identically. `extra` carries our engine/gfx labels, the
+        // total render span (frame 1 → end of last frame) + the derived ms/frame, and a
+        // convenience fps.
         const bench::FrameStats fs = timer.finish();
-        char extra[160];
-        std::snprintf(extra, sizeof(extra), "engine=%s gfx=%s drawn=%d fps=%.1f",
+        const double totalMs = (renderEndMs > renderStartMs) ? (renderEndMs - renderStartMs) : 0.0;
+        const double msPerFrame = frameNo > 0 ? totalMs / double(frameNo) : 0.0;
+        char extra[224];
+        std::snprintf(extra, sizeof(extra),
+                      "engine=%s gfx=%s drawn=%d total_ms=%.3f ms_per_frame=%.4f fps=%.1f",
                       BL_JS_ENGINE, bgfx::getRendererName(bgfx::getRendererType()),
-                      lite.lastDrawn(), fs.avgMs > 0 ? 1000.0 / fs.avgMs : 0.0);
+                      lite.lastDrawn(), totalMs, msPerFrame, msPerFrame > 0 ? 1000.0 / msPerFrame : 0.0);
         timer.printBenchLine(cli.sceneName, extra);
     }
     host.shutdown();

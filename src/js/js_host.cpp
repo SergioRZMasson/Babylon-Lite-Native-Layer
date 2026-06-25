@@ -1,12 +1,24 @@
 #include "js_host.h"
 
+#if defined(BL_JS_ENGINE_V8)
+// V8 engine: napi/env.h (V8 variant) pulls in <v8.h> + declares Napi::Attach(context);
+// libplatform provides NewDefaultPlatform + PumpMessageLoop. We bootstrap the platform,
+// isolate and context here (the rest of the app is engine-agnostic Napi::).
+#include <napi/env.h>
+#include <libplatform/libplatform.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <filesystem>
+#else
 // Edge-mode Chakra (chakra.dll / chakrart.lib), matching JsRuntimeHost's
 // js_native_api_chakra.h. Without this the <jsrt.h> stub pulls the legacy IE11
 // jsrt9 API (different JsCreateRuntime/JsCreateContext signatures).
 #define USE_EDGEMODE_JSRT
 #include <jsrt.h>
-
 #include <napi/env.h>
+#endif
 
 #if defined(BL_POLYFILL_URL) || defined(BL_POLYFILL_XMLHTTPREQUEST)
 #include <Babylon/JsRuntime.h>
@@ -26,6 +38,20 @@ namespace js {
 
 namespace {
 
+#if defined(BL_JS_ENGINE_V8)
+// The V8 platform is process-global (one per process, must outlive every isolate). Created
+// lazily on the first Host::initialize() and intentionally left alive until process exit.
+std::unique_ptr<v8::Platform> g_v8Platform;
+
+// Directory of the running executable (V8 looks for icudtl.dat there via
+// InitializeICUDefaultLocation; we copy it next to app.exe at build time).
+std::string executableDir() {
+    wchar_t buf[1024];
+    const DWORD n = ::GetModuleFileNameW(nullptr, buf, 1024);
+    if (n == 0) { return "."; }
+    return std::filesystem::path(std::wstring(buf, n)).parent_path().string();
+}
+#else
 // Chakra invokes this when a promise continuation (microtask) is queued. We stash
 // the task (add-ref'd to survive GC) and drain it later in Host::pumpJobs().
 void CALLBACK promiseContinuation(JsValueRef task, void* state) {
@@ -33,6 +59,7 @@ void CALLBACK promiseContinuation(JsValueRef task, void* state) {
     JsAddRef(task, nullptr);
     q->push(task);
 }
+#endif
 
 // console.* implementation: stringify every argument and print to stderr.
 Napi::Value consoleLog(const Napi::CallbackInfo& info) {
@@ -67,6 +94,39 @@ void reportError(const char* where, const Napi::Error& e) {
 Host::~Host() { shutdown(); }
 
 bool Host::initialize() {
+#if defined(BL_JS_ENGINE_V8)
+    // ---- V8 bootstrap (mirrors JsRuntimeHost AppRuntime_V8 / Babylon Native) ----
+    if (!g_v8Platform) {
+        const std::string exeDir = executableDir();
+        v8::V8::InitializeICUDefaultLocation(exeDir.c_str());
+        v8::V8::InitializeExternalStartupData(exeDir.c_str());
+        g_v8Platform = v8::platform::NewDefaultPlatform();
+        v8::V8::InitializePlatform(g_v8Platform.get());
+        v8::V8::Initialize();
+    }
+    v8::Isolate::CreateParams createParams;
+    auto* allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+    createParams.array_buffer_allocator = allocator;
+    arrayBufferAllocator_ = allocator;
+    v8::Isolate* isolate = v8::Isolate::New(createParams);
+    if (!isolate) {
+        std::fprintf(stderr, "[js] v8::Isolate::New failed\n");
+        return false;
+    }
+    isolate_ = isolate;
+    // Enter the isolate for the host's lifetime (single-threaded; no Locker needed). Drain
+    // microtasks explicitly in pumpJobs so promise resolution is deterministic per frame.
+    isolate->Enter();
+    isolate->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
+    {
+        v8::HandleScope handleScope(isolate);
+        v8::Local<v8::Context> context = v8::Context::New(isolate);
+        context->Enter(); // entered contexts survive this HandleScope (saved on the isolate)
+        contextGlobal_ = new v8::Global<v8::Context>(isolate, context);
+        env_ = Napi::Attach(context); // the napi env persists the context
+    }
+#else
+    // ---- Chakra bootstrap (in-box chakra.dll) ----
     JsRuntimeHandle runtime = JS_INVALID_RUNTIME_HANDLE;
     if (JsCreateRuntime(JsRuntimeAttributeNone, nullptr, &runtime) != JsNoError) {
         std::fprintf(stderr, "[js] JsCreateRuntime failed\n");
@@ -86,9 +146,12 @@ bool Host::initialize() {
     JsSetPromiseContinuationCallback(&promiseContinuation, &microtasks_);
 
     env_ = Napi::Attach();
+#endif
+
     // Legacy (in-box) Chakra predates ES2020's `globalThis`; the Babylon-Lite JS
     // modules rely on it (the __BL namespace, __bl_require, installed API). Point a
-    // `globalThis` property at the global object so bare `globalThis` resolves.
+    // `globalThis` property at the global object so bare `globalThis` resolves. (Harmless
+    // under V8, which has a native globalThis.)
     {
         Napi::HandleScope scope(env_);
         env_.Global().Set("globalThis", env_.Global());
@@ -112,6 +175,29 @@ bool Host::initialize() {
 }
 
 void Host::shutdown() {
+#if defined(BL_JS_ENGINE_V8)
+    if (!isolate_) { return; }
+    auto* isolate = static_cast<v8::Isolate*>(isolate_);
+    frameCallback_.Reset();
+    Napi::Detach(env_);
+    env_ = Napi::Env(nullptr);
+    if (contextGlobal_) {
+        auto* global = static_cast<v8::Global<v8::Context>*>(contextGlobal_);
+        {
+            v8::HandleScope scope(isolate);
+            global->Get(isolate)->Exit();
+        }
+        global->Reset();
+        delete global;
+        contextGlobal_ = nullptr;
+    }
+    isolate->Exit();
+    isolate->Dispose();
+    isolate_ = nullptr;
+    delete static_cast<v8::ArrayBuffer::Allocator*>(arrayBufferAllocator_);
+    arrayBufferAllocator_ = nullptr;
+    // g_v8Platform is intentionally kept alive until process exit.
+#else
     if (!runtime_) {
         return;
     }
@@ -125,6 +211,7 @@ void Host::shutdown() {
     JsSetCurrentContext(JS_INVALID_REFERENCE);
     JsDisposeRuntime(static_cast<JsRuntimeHandle>(runtime_));
     runtime_ = nullptr;
+#endif
 }
 
 void Host::installConsole() {
@@ -326,6 +413,18 @@ bool Host::callFrame(double timeMs, int frameNo) {
 }
 
 void Host::pumpJobs() {
+#if defined(BL_JS_ENGINE_V8)
+    if (!isolate_) { return; }
+    auto* isolate = static_cast<v8::Isolate*>(isolate_);
+    // Run any foreground tasks the platform queued (e.g. async HTTP continuations posted by
+    // UrlLib), then drain the promise-continuation (microtask) queue. kExplicit policy means
+    // microtasks only run when we checkpoint here.
+    if (g_v8Platform) {
+        while (v8::platform::PumpMessageLoop(g_v8Platform.get(), isolate)) {}
+    }
+    Napi::HandleScope scope(env_);
+    isolate->PerformMicrotaskCheckpoint();
+#else
     while (!microtasks_.empty()) {
         JsValueRef task = static_cast<JsValueRef>(microtasks_.front());
         microtasks_.pop();
@@ -343,6 +442,7 @@ void Host::pumpJobs() {
         }
         JsRelease(task, nullptr);
     }
+#endif
 }
 
 } // namespace js
