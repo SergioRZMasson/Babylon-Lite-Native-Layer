@@ -83,6 +83,14 @@ target_compile_definitions(bgfx PRIVATE
     BGFX_PLATFORM_SUPPORTS_SPIRV=0
     BGFX_PLATFORM_SUPPORTS_WGSL=0)
 
+# We decode images via WIC (see src/lite.cpp) and never link bimg_decode, so exclude it from
+# the build. Besides being dead code for us, the current upstream bimg's image_decode.cpp
+# pulls in AVIF/HEIF parsers that need external libs (libavif) which aren't vendored — building
+# it would fail on a missing avif/avif.h. (bimg itself, which bgfx needs, still builds.)
+if(TARGET bimg_decode)
+    set_target_properties(bimg_decode PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
+
 # ---------------------------------------------------------------------------
 # JS engine via Node-API (node-addon-api). The native seam is written against the
 # engine-agnostic Napi:: API, so the engine is swapped at build time exactly like
@@ -295,7 +303,6 @@ if(NODE_EXECUTABLE)
     add_custom_target(js_bundles ALL
         COMMAND "${NODE_EXECUTABLE}" "${JS_DIR}/build.mjs"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${JS_DIR}/dist" "${CMAKE_BINARY_DIR}/bin/js"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${JS_DIR}/legacy" "${CMAKE_BINARY_DIR}/bin/js/legacy"
         WORKING_DIRECTORY "${JS_DIR}"
         COMMENT "Bundling TypeScript scenes (esbuild) → bin/js")
     add_dependencies(js_bundles app)

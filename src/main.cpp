@@ -21,7 +21,6 @@
 #include "native_window.h"
 
 #include <bgfx/bgfx.h>
-#include <bgfx/platform.h>
 #include <bx/bx.h>
 
 #include "js_host.h"
@@ -296,7 +295,7 @@ int main(int argc, char** argv) {
 
     std::string scriptPath = cli.scriptPath;
     if (scriptPath.empty()) {
-        scriptPath = (fs::path(executableDir()) / "js" / "legacy" / "cube.js").string();
+        scriptPath = (fs::path(executableDir()) / "js" / "bench-csm-boombox.js").string();
     }
     std::fprintf(stderr, "[main] loading script: %s (cpu=%s grid=%d)\n", scriptPath.c_str(), cli.cpu.c_str(), cli.grid);
     if (!host.runFile(scriptPath)) {
