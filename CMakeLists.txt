@@ -216,7 +216,10 @@ set_target_properties(app PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 find_program(NODE_EXECUTABLE NAMES node)
-find_program(NPM_EXECUTABLE NAMES npm npm.cmd)
+# Prefer npm.cmd: CMake's execute_process/custom_target can run a .cmd via the shell, but the
+# extensionless `npm` (a sh script that also ships on Windows) is not directly executable and
+# makes the configure-time `npm install` fail with "unknown error".
+find_program(NPM_EXECUTABLE NAMES npm.cmd npm)
 set(JS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/js")
 
 # Stage assets next to the exe (if present).

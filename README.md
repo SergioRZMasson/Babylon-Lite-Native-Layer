@@ -71,11 +71,12 @@ and each scene is compiled to a **self-contained** JS the native host loads stan
 ## Build (Windows, x64)
 
 Requires Visual Studio 2022, CMake, Ninja, and **Node.js** (for bundling the TypeScript
-scenes). From a *Developer* shell (or call `vcvars64.bat` first):
+scenes). From a *Developer* shell (or call `vcvars64.bat` first), **two commands build
+everything — C++ and JS**:
 
 ```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target app
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # configure (+ npm install in js/)
+cmake --build build                                        # build: app.exe + shaders + JS bundles + assets
 ```
 
 The first configure clones bgfx (BabylonJS fork, pinned to Babylon Native's tag) and
@@ -84,7 +85,12 @@ commit Babylon Native uses), and runs `npm install` in `js/` (installs esbuild).
 build also compiles bgfx's `shaderc` (slow, one-time). The standard build includes the HTTP
 polyfills (see below).
 
-Every build also runs the **`js_bundles`** target: `node js/build.mjs` bundles each
+`cmake --build build` builds the default (`all`) target, which is **everything**: the
+`app` executable + its `shaders`, the **`js_bundles`** target (TypeScript → `bin/js`), and
+`stage_assets`. Build just the exe (skip JS bundling + asset staging) with
+`cmake --build build --target app`.
+
+Every full build runs the **`js_bundles`** target: `node js/build.mjs` bundles each
 TypeScript scene with esbuild (tree-shaking the API mirror to just what the scene uses +
 minifying) into a self-contained `js/dist/<name>.js`, then copies the bundles to
 `build/bin/js/`. (Bundle the scenes alone any time with `node js/build.mjs`, or typecheck
@@ -386,7 +392,7 @@ Measure per-frame time the same way Cedric's DawnTest bench does, so the numbers
 directly comparable in format + methodology.
 
 ```powershell
-cmake --build build --target app
+cmake --build build                                # builds app.exe + bundles bench-scene200.js
 node tools/bench/run-bench.mjs --frames 600        # --no-open to skip the browser
 ```
 
