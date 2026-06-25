@@ -11,7 +11,7 @@ A Dawn-free native host that runs JavaScript orchestration on top of a native
   via **JsRuntimeHost** (`-DJS_ENGINE=…`); on Windows it defaults to the **in-box
   Chakra** runtime (`chakrart.lib` → `C:\Windows\System32\Chakra.dll`), so the engine
   adds ~no size to the `.exe`.
-- Creates a Win32 window and initialises **bgfx** on it (D3D11 backend), the same
+- Creates a Win32 window and initialises **bgfx** on it (D3D12 backend), the same
   rendering library Babylon Native uses.
 - Exposes a tiny native rendering seam to JS (`gfx.createMesh`, `gfx.setCamera`,
   `gfx.drawMesh`, `gfx.setClearColor`).
@@ -19,7 +19,7 @@ A Dawn-free native host that runs JavaScript orchestration on top of a native
   matrix, all in JS) and calls into `gfx.*` each frame. C++ owns the render loop
   and the GPU work.
 - The cube is shaded with the **Standard material** shader **hand-ported from
-  Babylon-Lite's WGSL** to bgfx `.sc` (`shaders/`), compiled to D3D11 bytecode by
+  Babylon-Lite's WGSL** to bgfx `.sc` (`shaders/`), compiled to Direct3D (SM5) bytecode by
   bgfx's `shaderc` at build time (no runtime WGSL translation, no Dawn). The compiled
   shaders ship as standalone `.bin` files in `shaders/` next to the exe (not embedded
   in the binary), loaded at startup from `<exeDir>/shaders/` — keeping the `.exe` small.
@@ -133,8 +133,8 @@ To build a minimal `napi`-only binary without the HTTP stack (e.g. for size expe
 turn them off — this also restores the lean JsRuntimeHost `napi`-target-only fetch:
 
 ```powershell
-cmake -S . -B build-min -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel `
-      -DMINIMIZE_SIZE=ON -DBL_POLYFILL_URL=OFF -DBL_POLYFILL_XMLHTTPREQUEST=OFF
+cmake -S . -B build-min -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DBL_POLYFILL_URL=OFF -DBL_POLYFILL_XMLHTTPREQUEST=OFF
 cmake --build build-min --target app
 ```
 
@@ -153,7 +153,7 @@ build/bin/app.exe --script js/dist/bench-scene200.js --no-vsync
 # Headless verification (render N frames, capture a TGA near the end):
 build/bin/app.exe --frames 30 --width 480 --height 360 --screenshot out.tga
 
-# Other flags: --script <path>  --warp (D3D11 software adapter)
+# Other flags: --script <path>  --warp (D3D12 WARP software adapter)
 ```
 
 The screenshot TGA is top-origin/BGRA; load it directly (do **not** vertically
@@ -197,32 +197,40 @@ Run a scene by pointing `--script` at its bundle (no `--prelude`): the host inst
 browser-like globals (`document`/`window`/`performance`, and `URL`/`URLSearchParams` via the
 polyfill) so the self-contained bundle runs unchanged.
 
-## Size-optimized build
+## Binary size
 
-The default build now includes the HTTP polyfills (URL + XMLHttpRequest → UrlLib). For the
-smallest possible `.exe`, configure a separate build dir that turns those off and enables
-link-time optimization + a D3D11-only bgfx:
+Every build optimizes for **speed** (`/O2` — this binary exists for a perf benchmark) while
+still applying the size reductions that cost nothing in speed, with **no toggle** (the old
+`MINIMIZE_SIZE` flag was removed):
 
-```powershell
-cmake -S . -B build-min -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DMINIMIZE_SIZE=ON `
-      -DBL_POLYFILL_URL=OFF -DBL_POLYFILL_XMLHTTPREQUEST=OFF
-cmake --build build-min --target app
-```
+- **D3D12-only bgfx** — only the Direct3D12 backend is compiled in; every other backend
+  (D3D11 / D3D9 / GL / GLES / Vulkan / Metal / WebGPU / …) is disabled, so that code isn't
+  in the binary.
+- **LTO + dead-strip** — link-time optimization (cross-module inlining + dead-code
+  elimination, which helps *both* size and speed) plus function/data-level linking with
+  `/OPT:REF /OPT:ICF`.
+- **One image library** — texture/IBL decoding uses **bimg** (already shipped by bgfx) rather
+  than a separately vendored stb_image, trimmed to the PNG+JPEG parsers we load (EXR/tinyexr,
+  BMP, GIF, HDR, PIC, PNM, PSD, TGA disabled; re-enable with `-DBL_PARSE_<FMT>=ON`).
+- Compiled shaders ship as standalone `.bin` files (not embedded C arrays), so the shader
+  bytecode lives outside the binary.
 
-Compiled shaders are emitted as standalone `.bin` files rather than embedded C arrays,
-so the shader bytecode lives outside the binary.
+For an even smaller `.exe`, also drop the HTTP polyfills (above) with `-DBL_POLYFILL_URL=OFF
+-DBL_POLYFILL_XMLHTTPREQUEST=OFF`.
 
-### `app.exe` size by JS engine (napi-only, no polyfills)
+### `app.exe` size by JS engine (napi-only, no polyfills; historical baseline)
 
-| JS engine | Release | MinSizeRel + `MINIMIZE_SIZE` |
-|---|---|---|
-| QuickJS (static, prior) | 1.54 MB | 1.18 MB |
-| **Chakra (in-box, Node-API)** | **0.80 MB** | **0.67 MB** |
+| JS engine | Release |
+|---|---|
+| QuickJS (static, prior) | 1.54 MB |
+| **Chakra (in-box, Node-API)** | **0.80 MB** |
 
 Chakra nearly halves the binary because the engine is the OS-provided DLL instead of
 ~0.7 MB of statically-linked engine code. The default polyfill build adds the URL +
 XMLHttpRequest/UrlLib static libs (~+0.3 MB, still no extra DLLs — HTTP is in-box Win32).
-See `../.ai/phase6-napi-engine-abstraction.md` and `../.ai/phase12-polyfills-http.md`.
+The V8 benchmark build is larger and additionally ships the V8 redist (v8.dll ~24 MB +
+icudtl.dat + helpers) next to `app.exe`. See `../.ai/phase6-napi-engine-abstraction.md` and
+`../.ai/phase12-polyfills-http.md`.
 
 ## Status
 

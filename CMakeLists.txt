@@ -6,24 +6,23 @@ set(CMAKE_CXX_STANDARD 20)  # bx/bgfx require C++20
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT WIN32)
-    message(FATAL_ERROR "Babylon-Lite-Native-Layer prototype currently targets Windows (D3D11) only.")
+    message(FATAL_ERROR "Babylon-Lite-Native-Layer prototype currently targets Windows (D3D12) only.")
 endif()
 
 # ---------------------------------------------------------------------------
-# Aggressive size optimization. ON by default (we always want the smallest binary):
-# applies LTO (whole-program dead-code elimination), /Os, function/data-level linking +
-# dead-strip. Set BEFORE FetchContent so the bgfx/napi targets inherit it. Turn off for a
-# faster (non-LTO) debug/iteration build with -DMINIMIZE_SIZE=OFF.
+# Optimization: always optimize for SPEED (/O2, from the Release build type — never /Os),
+# since this binary exists for a performance benchmark. We still apply the size reductions
+# that cost nothing in speed: link-time optimization (cross-module inlining + dead-code
+# elimination — helps both size AND perf) and function/data-level linking with dead-strip
+# (/Gy /Gw + /OPT:REF /OPT:ICF). Applied to every build (no toggle). Set BEFORE FetchContent
+# so the bgfx/napi/JsRuntimeHost targets inherit it.
 # ---------------------------------------------------------------------------
-option(MINIMIZE_SIZE "Aggressively optimize for binary size" ON)
-if(MINIMIZE_SIZE)
-    cmake_policy(SET CMP0069 NEW)
-    set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-    if(MSVC)
-        add_compile_options(/Os /Gy /Gw)
-        add_link_options(/OPT:REF /OPT:ICF)
-    endif()
+cmake_policy(SET CMP0069 NEW)
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+if(MSVC)
+    add_compile_options(/Gy /Gw)
+    add_link_options(/OPT:REF /OPT:ICF)
 endif()
 
 include(FetchContent)
