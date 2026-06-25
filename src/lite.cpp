@@ -5,9 +5,11 @@
 #include "mathx.h"
 #include "napi_helpers.h"
 
-#include <bimg/decode.h>
-#include <bx/allocator.h>
-#include <bx/error.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <wincodec.h>   // Windows Imaging Component (PNG/JPEG decode) — no bundled decoders
 
 #include <cmath>
 #include <cstdint>
@@ -23,21 +25,69 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 
-// Decode an encoded image (PNG/JPEG) to tightly-packed RGBA8 via bimg (the image library
-// bgfx already ships). Returns the bimg ImageContainer (RGBA8, owns the pixels) or nullptr;
-// the caller reads m_data/m_width/m_height and frees with bimg::imageFree. Replaces the
-// previously-vendored stb_image so we don't carry a second image decoder in the binary.
-bimg::ImageContainer* decodeImageRGBA8(const uint8_t* data, size_t size) {
-    static bx::DefaultAllocator s_allocator;
-    if (!data || size == 0) { return nullptr; }
-    bx::Error err;
-    bimg::ImageContainer* img = bimg::imageParse(&s_allocator, data, uint32_t(size),
-                                                 bimg::TextureFormat::RGBA8, &err);
-    if (!img || !err.isOk()) {
-        if (img) { bimg::imageFree(img); }
-        return nullptr;
+// Decoded image: tightly-packed RGBA8 + dimensions.
+struct DecodedImage {
+    std::vector<uint8_t> rgba;
+    int width = 0;
+    int height = 0;
+    bool ok() const { return width > 0 && height > 0 && !rgba.empty(); }
+};
+
+// Process-wide WIC factory (created on first use, released at process exit). WIC is the
+// OS image codec, so we decode PNG/JPEG via Windows instead of bundling software decoders
+// (lodepng/stb/tinyexr) — keeping the binary small (no bimg_decode).
+IWICImagingFactory* wicFactory() {
+    static IWICImagingFactory* s_factory = []() -> IWICImagingFactory* {
+        // WIC needs COM on this (the JS) thread. MTA is fine; if COM is already initialized
+        // in another mode, RPC_E_CHANGED_MODE is harmless — the factory still works.
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        IWICImagingFactory* f = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&f)))) {
+            return nullptr;
+        }
+        return f;
+    }();
+    return s_factory;
+}
+
+// Decode an encoded image (PNG/JPEG) to tightly-packed RGBA8 using WIC. Replaces the bundled
+// software decoder (bimg/stb), so the binary carries no image-decode library.
+DecodedImage decodeImageRGBA8(const uint8_t* data, size_t size) {
+    DecodedImage out;
+    if (!data || size == 0) { return out; }
+    IWICImagingFactory* factory = wicFactory();
+    if (!factory) { return out; }
+
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+
+    HRESULT hr = factory->CreateStream(&stream);
+    if (SUCCEEDED(hr)) { hr = stream->InitializeFromMemory(const_cast<BYTE*>(data), DWORD(size)); }
+    if (SUCCEEDED(hr)) { hr = factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder); }
+    if (SUCCEEDED(hr)) { hr = decoder->GetFrame(0, &frame); }
+    if (SUCCEEDED(hr)) { hr = factory->CreateFormatConverter(&converter); }
+    if (SUCCEEDED(hr)) {
+        // Convert whatever the source is to straight RGBA8 (matches createTexture2D /
+        // uploadEnvFace byte order, same as the previous bimg RGBA8 output).
+        hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+                                   nullptr, 0.0, WICBitmapPaletteTypeCustom);
     }
-    return img;
+    UINT w = 0, h = 0;
+    if (SUCCEEDED(hr)) { hr = converter->GetSize(&w, &h); }
+    if (SUCCEEDED(hr) && w > 0 && h > 0) {
+        out.rgba.resize(size_t(w) * size_t(h) * 4);
+        hr = converter->CopyPixels(nullptr, w * 4, UINT(out.rgba.size()), out.rgba.data());
+        if (SUCCEEDED(hr)) { out.width = int(w); out.height = int(h); }
+        else { out.rgba.clear(); }
+    }
+    if (converter) { converter->Release(); }
+    if (frame) { frame->Release(); }
+    if (decoder) { decoder->Release(); }
+    if (stream) { stream->Release(); }
+    return out;
 }
 
 std::string baseName(const std::string& p) {
@@ -974,11 +1024,9 @@ void Engine::registerOn(js::Host& host) {
         size_t bytes = 0;
         const uint8_t* png = js::argBytes(info, 2, &bytes);
         if (!png || bytes == 0) { return info.Env().Undefined(); }
-        bimg::ImageContainer* img = decodeImageRGBA8(png, bytes);
-        if (img) {
-            gfx_->uploadEnvFace(mip, face, int(img->m_width), int(img->m_height),
-                                static_cast<const uint8_t*>(img->m_data));
-            bimg::imageFree(img);
+        DecodedImage img = decodeImageRGBA8(png, bytes);
+        if (img.ok()) {
+            gfx_->uploadEnvFace(mip, face, img.width, img.height, img.rgba.data());
         }
         return info.Env().Undefined();
     });
@@ -1106,11 +1154,9 @@ void Engine::registerOn(js::Host& host) {
         size_t bytes = 0;
         const uint8_t* enc = js::argBytes(info, 0, &bytes);
         if (!enc || bytes == 0) { return Napi::Number::New(env, -1); }
-        bimg::ImageContainer* img = decodeImageRGBA8(enc, bytes);
-        if (!img) { return Napi::Number::New(env, -1); }
-        const int id = gfx_->createTexture2D(int(img->m_width), int(img->m_height),
-                                             static_cast<const uint8_t*>(img->m_data));
-        bimg::imageFree(img);
+        DecodedImage img = decodeImageRGBA8(enc, bytes);
+        if (!img.ok()) { return Napi::Number::New(env, -1); }
+        const int id = gfx_->createTexture2D(img.width, img.height, img.rgba.data());
         return Napi::Number::New(env, id);
     });
 

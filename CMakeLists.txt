@@ -64,34 +64,6 @@ target_compile_definitions(bgfx PRIVATE
     BGFX_CONFIG_RENDERER_AGC=0)
 
 # ---------------------------------------------------------------------------
-# Trim bimg's image parsers to just the formats we actually load. bimg_decode's
-# image_decode.cpp pulls in a decoder per BIMG_CONFIG_PARSE_<FMT> (all default ON): PNG
-# (lodepng), JPEG (stb_image) and — notably large — EXR (tinyexr), plus BMP/GIF/HDR/PIC/
-# PNM/PSD/TGA (stb_image). We only decode glTF textures (PNG/JPEG) and .env faces (PNG), so
-# disable the rest. These are #ifndef-guarded, so PRIVATE compile defs on bimg_decode (set
-# before it builds) win. Toggle individual formats with -DBL_PARSE_<FMT>=ON if ever needed.
-# ---------------------------------------------------------------------------
-option(BL_PARSE_PNG  "bimg: parse PNG (glTF + .env)" ON)
-option(BL_PARSE_JPEG "bimg: parse JPEG (glTF)"        ON)
-option(BL_PARSE_BMP  "bimg: parse BMP"  OFF)
-option(BL_PARSE_EXR  "bimg: parse EXR (pulls tinyexr)" OFF)
-option(BL_PARSE_GIF  "bimg: parse GIF"  OFF)
-option(BL_PARSE_HDR  "bimg: parse HDR"  OFF)
-option(BL_PARSE_PIC  "bimg: parse PIC"  OFF)
-option(BL_PARSE_PNM  "bimg: parse PNM"  OFF)
-option(BL_PARSE_PSD  "bimg: parse PSD"  OFF)
-option(BL_PARSE_TGA  "bimg: parse TGA"  OFF)
-if(TARGET bimg_decode)
-    foreach(_fmt PNG JPEG BMP EXR GIF HDR PIC PNM PSD TGA)
-        if(BL_PARSE_${_fmt})
-            target_compile_definitions(bimg_decode PRIVATE BIMG_CONFIG_PARSE_${_fmt}=1)
-        else()
-            target_compile_definitions(bimg_decode PRIVATE BIMG_CONFIG_PARSE_${_fmt}=0)
-        endif()
-    endforeach()
-endif()
-
-# ---------------------------------------------------------------------------
 # JS engine via Node-API (node-addon-api). The native seam is written against the
 # engine-agnostic Napi:: API, so the engine is swapped at build time exactly like
 # Babylon Native. JsRuntimeHost provides the Node-API implementation per engine.
@@ -209,10 +181,13 @@ add_executable(app
 add_dependencies(app shaders)
 
 target_include_directories(app PRIVATE src src/js)
-# Texture/IBL-face decoding uses bimg (already shipped by bgfx) instead of a separately
-# vendored stb_image, so the binary carries a single image library. bimg_decode provides
-# bimg::imageParse; its parser set is trimmed below to just the formats we load.
-target_link_libraries(app PRIVATE bgfx bx bimg bimg_decode napi)
+# Texture / IBL-face decoding uses the OS image codec (Windows Imaging Component, see
+# src/lite.cpp) — NOT a bundled software decoder — so we link bimg (which bgfx needs
+# internally for format conversion / mip generation) but NOT bimg_decode (lodepng / stb /
+# tinyexr). That keeps the bundled image-decode code out of the binary.
+target_link_libraries(app PRIVATE bgfx bx bimg napi)
+# Windows Imaging Component (image decode) + COM runtime it needs.
+target_link_libraries(app PRIVATE windowscodecs ole32)
 target_compile_definitions(app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
     BL_JS_ENGINE="${JS_ENGINE}")
 # Boolean engine selector so the host (src/js/js_host.cpp) compiles the right bootstrap
