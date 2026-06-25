@@ -10,9 +10,9 @@
 
 export { createEngine } from "./engine.js";
 export {
-    createSceneContext, addToScene, registerScene, startEngine, attachControl,
-    onBeforeRender, setParent, setFog, loadSkybox, stopEngine, removeFromScene,
-    setCameraLimits,
+    createSceneContext, addToScene, registerScene, registerSceneWithShadowSupport,
+    startEngine, attachControl, onBeforeRender, setParent, setFog, loadSkybox,
+    stopEngine, removeFromScene, setCameraLimits,
 } from "./scene.js";
 export { createArcRotateCamera, createDefaultCamera } from "./camera.js";
 export {
@@ -22,6 +22,12 @@ export {
     createBox, createSphere, createGround, createTorus, createTransformNode,
     setThinInstances, setThinInstanceColors,
 } from "./mesh.js";
+export { cloneTransformNode, getContainerMeshes } from "./clone.js";
+export {
+    createCsmDirectionalShadowGenerator, createEsmDirectionalShadowGenerator,
+    createPcfDirectionalShadowGenerator, createPcfSpotlightShadowGenerator,
+    setShadowTaskCasterMeshes,
+} from "./shadow.js";
 export { createStandardMaterial, createPbrMaterial, rebuildMaterial } from "./material.js";
 export { createSolidTexture2D } from "./texture.js";
 export {

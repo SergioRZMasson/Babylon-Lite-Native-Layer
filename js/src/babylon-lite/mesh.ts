@@ -21,6 +21,11 @@ export function wrapMesh(id: number): any {
         get() { return mesh._parent || null; },
         set(p) { mesh._parent = p; __bl_setParent(id, p ? p._id : -1); },
     });
+    let _receive = false;
+    Object.defineProperty(mesh, "receiveShadows", {
+        get() { return _receive; },
+        set(v) { _receive = !!v; __bl_setReceiveShadows(id, v ? 1 : 0); },
+    });
     return mesh;
 }
 

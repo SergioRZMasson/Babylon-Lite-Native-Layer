@@ -167,6 +167,8 @@ compile_shader_bin(fragment fs_cube.sc varying.def.sc     fs_cube.bin)
 compile_shader_bin(vertex   vs_pbr.sc  varying_pbr.def.sc vs_pbr.bin)
 compile_shader_bin(fragment fs_pbr.sc  varying_pbr.def.sc fs_pbr.bin)
 compile_shader_bin(vertex   vs_skinned.sc varying_skinned.def.sc vs_skinned.bin)
+compile_shader_bin(vertex   vs_shadow.sc  varying_shadow.def.sc  vs_shadow.bin)
+compile_shader_bin(fragment fs_shadow.sc  varying_shadow.def.sc  fs_shadow.bin)
 add_custom_target(shaders ALL DEPENDS ${SHADER_BINS})
 
 # ---------------------------------------------------------------------------

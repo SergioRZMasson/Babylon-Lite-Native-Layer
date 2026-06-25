@@ -1,6 +1,7 @@
 // Scene factory + scene assembly/lifecycle (mirrors src/scene + engine lifecycle).
 
 import { state } from "./internal.js";
+import { bakeCloneInto } from "./clone.js";
 
 export function createSceneContext(_engine?: any): any {
     const id = __bl_createScene();
@@ -22,6 +23,7 @@ export function addToScene(scene: any, entity: any): void {
     if (!entity) { return; }
     switch (entity._kind) {
         case "mesh": __bl_addMeshToScene(scene._id, entity._id); break;
+        case "clonedNode": bakeCloneInto(scene._id, entity); break;
         case "container":
             for (let i = 0; i < entity._meshIds.length; i++) { __bl_addMeshToScene(scene._id, entity._meshIds[i]); }
             // glTF animation groups: expose on the scene and auto-play (Babylon ticks
@@ -34,7 +36,12 @@ export function addToScene(scene: any, entity: any): void {
                 }
             }
             break;
-        case "light": __bl_setSceneLight(scene._id, entity._id); break;
+        case "light":
+            // Directional lights are the CSM "sun" (a distinct slot from the hemispheric
+            // fill); everything else is the scene's primary light.
+            if (entity._lightType === "directional") { __bl_setSceneSun(scene._id, entity._id); }
+            else { __bl_setSceneLight(scene._id, entity._id); }
+            break;
         case "camera": __bl_setSceneCamera(scene._id, entity._id); break;
         default: break;
     }
@@ -42,6 +49,16 @@ export function addToScene(scene: any, entity: any): void {
 
 export function registerScene(scene: any): Promise<void> {
     const s = scene && scene._id != null ? scene._id : state.lastSceneId;
+    __bl_registerScene(s);
+    state.lastSceneId = s;
+    return Promise.resolve();
+}
+
+// Like registerScene, but also enables CSM rendering (the last-created shadow generator
+// drives the scene's sun). Mirrors Babylon-Lite's shadow-aware scene registration.
+export function registerSceneWithShadowSupport(scene: any): Promise<void> {
+    const s = scene && scene._id != null ? scene._id : state.lastSceneId;
+    if (state.lastShadowGenId != null) { __bl_enableShadows(s, state.lastShadowGenId); }
     __bl_registerScene(s);
     state.lastSceneId = s;
     return Promise.resolve();

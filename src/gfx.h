@@ -53,8 +53,9 @@ public:
     void setStandardMaterial(float diffR, float diffG, float diffB, float alpha,
                              float specR, float specG, float specB, float glossiness);
 
-    // worldMatrix: 16 floats, column-major (bgfx convention).
-    void drawMesh(int meshId, const float worldMatrix[16]);
+    // worldMatrix: 16 floats, column-major (bgfx convention). `receiveShadows` makes a
+    // standard-material draw sample the CSM atlas (the ground in the benchmark).
+    void drawMesh(int meshId, const float worldMatrix[16], bool receiveShadows = false);
 
     // Draw `count` instances of `meshId`, each with a 16-float column-major world
     // matrix packed back-to-back in `worldMatrices`. Used by the JS-baseline path
@@ -123,6 +124,18 @@ public:
     // prefilter LOD-generation scale and contrast (image-processing) from the .env.
     void setEnvironmentParams(float intensity, float exposure, float lodScale, float contrast);
 
+    // ---- Directional sun + cascaded shadow maps (CSM) ----
+    // Directional "sun" used by the standard-material shadow path (dir = travel direction).
+    void setSun(float dx, float dy, float dz, float r, float g, float b);
+    // Begin the CSM shadow pass for this frame: fit `numCascades` cascades to the current
+    // camera frustum (capped to the caster sphere center/radius) along the sun direction,
+    // (re)create the R32F atlas if `mapSize` changed, and prime the cascade views. Casters
+    // are then submitted via drawShadowCaster; the main pass samples the atlas.
+    void beginShadowPass(int mapSize, int numCascades, float lambda, float bias,
+                         const float sceneCenter[3], float sceneRadius);
+    // Submit a caster mesh's geometry (by gfx mesh id) into every cascade view (depth only).
+    void drawShadowCaster(int meshId, const float world[16]);
+
 private:
     struct Mesh {
         bgfx::VertexBufferHandle vbh = BGFX_INVALID_HANDLE;
@@ -185,6 +198,32 @@ private:
     float pbrLightColor_[4] = { 1, 1, 1, 1 };
     float pbrAmbientSky_[4] = { 0.4f, 0.45f, 0.5f, 1 };
     float pbrAmbientGround_[4] = { 0.1f, 0.1f, 0.12f, 1 };
+
+    // ---- CSM shadow pipeline ----
+    bgfx::ProgramHandle shadowProgram_ = BGFX_INVALID_HANDLE; // vs_shadow + fs_shadow (depth)
+    bgfx::TextureHandle shadowAtlas_ = BGFX_INVALID_HANDLE;   // R32F, 2x2 cascade atlas
+    bgfx::TextureHandle shadowDepth_ = BGFX_INVALID_HANDLE;   // atlas depth attachment
+    bgfx::FrameBufferHandle shadowFb_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle uCsmVP_ = BGFX_INVALID_HANDLE;        // mat4 × 4
+    bgfx::UniformHandle uCsmSplits_ = BGFX_INVALID_HANDLE;    // view-space far split per cascade
+    bgfx::UniformHandle uShadowParams_ = BGFX_INVALID_HANDLE; // numCascades, bias, atlasTexel, originBottomLeft
+    bgfx::UniformHandle uShadowEnable_ = BGFX_INVALID_HANDLE; // per-draw receiveShadows
+    bgfx::UniformHandle uSunDir_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle uSunColor_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle uCamForward_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle sShadowAtlas_ = BGFX_INVALID_HANDLE;
+    static const bgfx::ViewId kShadowView0 = 1;              // cascades use views 1..4
+    int shadowMapSize_ = 0;                                  // current per-cascade atlas tile
+    int shadowCascades_ = 0;
+    bool shadowsActive_ = false;                            // this frame has a CSM pass
+    float csmVP_[4][16] = {};                                // per-cascade view-proj (column-major)
+    float csmSplits_[4] = { 1e9f, 1e9f, 1e9f, 1e9f };       // view-space far distance per cascade
+    float shadowBias_ = 0.0008f;
+    float sunDir_[4] = { 0, -1, 0, 0 };
+    float sunColor_[4] = { 0, 0, 0, 0 };                    // 0 = no sun (standard shader unchanged)
+    float camForward_[4] = { 0, 0, 1, 0 };
+    void ensureShadowTargets(int mapSize);
+    void bindShadowUniforms();                               // main-pass CSM uniforms + atlas
 
     // Ported Standard-material uniforms.
     bgfx::UniformHandle uLightDir_ = BGFX_INVALID_HANDLE;

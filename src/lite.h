@@ -37,6 +37,8 @@ struct Light {
     float intensity = 1.0f;
     float diffuse[3] = { 1, 1, 1 };
     float ground[3] = { 0, 0, 0 };
+    float pos[3] = { 0, 0, 0 };   // directional "sun" position (CSM uses the direction only)
+    bool directional = false;
 };
 
 struct Camera {
@@ -61,6 +63,7 @@ struct Mesh {
     float rot[3] = { 0, 0, 0 }; // euler radians (Babylon yaw-pitch-roll)
     float scale[3] = { 1, 1, 1 };
     float boundRadius = 1.0f;   // local bounding-sphere radius (pre-scale)
+    bool receiveShadows = false; // standard-material receivers sample the CSM atlas
     std::vector<float> thin;    // 16 floats per thin-instance (optional)
     int thinCount = 0;
     // Retained procedural geometry (pos/normal/idx) so a primitive built natively in the
@@ -121,10 +124,26 @@ struct Skin {
     int meshNode = -1;          // node the skinned mesh is attached to (invMeshWorld source)
 };
 
+// A directional cascaded-shadow-map generator: which light casts, map resolution, cascade
+// count + practical-split lambda + depth bias, and the caster mesh ids whose depth is
+// rendered into the cascades each frame. ESM/PCF spotlight variants collapse onto this
+// (numCascades=1) since the native renderer uses one CSM-atlas shadow path.
+struct ShadowGen {
+    int lightId = -1;
+    int mapSize = 2048;
+    int numCascades = 4;
+    float lambda = 0.7f;
+    float bias = 0.0008f;
+    std::vector<int> casters;
+};
+
 struct Scene {
     uint32_t clearRgba = 0x0d0f17ff;
     int cameraId = -1;
     int lightId = -1;           // v1: a single hemispheric light
+    int sunId = -1;             // directional "sun" (CSM caster + direct term)
+    bool shadows = false;       // registerSceneWithShadowSupport enabled CSM
+    int shadowGenId = -1;       // active shadow generator for this scene
     std::vector<int> meshIds;
     bool active = false;
 };
@@ -156,6 +175,7 @@ private:
     std::vector<Node> nodes_;
     std::vector<AnimClip> anims_;
     std::vector<Skin> skins_;
+    std::vector<ShadowGen> shadowGens_;
     std::vector<float> bonePalette_;      // scratch: 16 floats per joint, per draw
     int activeScene_ = -1;
     int lastDrawn_ = 0;

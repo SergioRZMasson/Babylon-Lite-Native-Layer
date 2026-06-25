@@ -321,12 +321,59 @@ int Engine::renderFrame(float timeSec) {
                           0.55f, 0.57f, 0.6f, 0.20f, 0.19f, 0.18f);
     }
 
+    // Directional "sun" (CSM caster + a standard-shader Lambert term). Zeroed when absent so
+    // the standard shader's sun contribution vanishes (no regression for sun-less scenes).
+    if (scene.sunId >= 0 && scene.sunId < int(lights_.size())) {
+        const Light& sun = lights_[size_t(scene.sunId)];
+        gfx_->setSun(sun.dir[0], sun.dir[1], sun.dir[2],
+                     sun.diffuse[0] * sun.intensity, sun.diffuse[1] * sun.intensity, sun.diffuse[2] * sun.intensity);
+    } else {
+        gfx_->setSun(0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
     float vp[16];
     gfx_->getViewProj(vp);
     float frustum[6][4];
     mathx::extractFrustum(vp, frustum);
 
     for (Mesh& m : meshes_) { m.worldDone = false; }
+
+    // --- CSM shadow pass: fit cascades to the caster bounds + render caster depth into the
+    //     atlas BEFORE the main pass (the standard-material receivers then sample it) ---
+    if (scene.shadows && scene.shadowGenId >= 0 && scene.shadowGenId < int(shadowGens_.size())) {
+        ShadowGen& sg = shadowGens_[size_t(scene.shadowGenId)];
+        if (!sg.casters.empty()) {
+            float bmin[3] = { 1e30f, 1e30f, 1e30f };
+            float bmax[3] = { -1e30f, -1e30f, -1e30f };
+            for (int cid : sg.casters) {
+                if (cid < 0 || cid >= int(meshes_.size())) { continue; }
+                Mesh& cm = meshes_[size_t(cid)];
+                if (cm.node >= 0 && cm.node < int(nodes_.size())) {
+                    std::memcpy(cm.world, nodes_[size_t(cm.node)].world, sizeof(cm.world));
+                    cm.worldDone = true;
+                } else {
+                    computeWorld(cid);
+                }
+                const float sx = std::sqrt(cm.world[0] * cm.world[0] + cm.world[1] * cm.world[1] + cm.world[2] * cm.world[2]);
+                const float sy = std::sqrt(cm.world[4] * cm.world[4] + cm.world[5] * cm.world[5] + cm.world[6] * cm.world[6]);
+                const float sz = std::sqrt(cm.world[8] * cm.world[8] + cm.world[9] * cm.world[9] + cm.world[10] * cm.world[10]);
+                const float r = cm.boundRadius * std::fmax(sx, std::fmax(sy, sz));
+                const float x = cm.world[12], y = cm.world[13], z = cm.world[14];
+                if (x - r < bmin[0]) { bmin[0] = x - r; } if (x + r > bmax[0]) { bmax[0] = x + r; }
+                if (y - r < bmin[1]) { bmin[1] = y - r; } if (y + r > bmax[1]) { bmax[1] = y + r; }
+                if (z - r < bmin[2]) { bmin[2] = z - r; } if (z + r > bmax[2]) { bmax[2] = z + r; }
+            }
+            const float center[3] = { (bmin[0] + bmax[0]) * 0.5f, (bmin[1] + bmax[1]) * 0.5f, (bmin[2] + bmax[2]) * 0.5f };
+            const float dx = bmax[0] - bmin[0], dy = bmax[1] - bmin[1], dz = bmax[2] - bmin[2];
+            const float radius = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
+            gfx_->beginShadowPass(sg.mapSize, sg.numCascades, sg.lambda, sg.bias, center, radius);
+            for (int cid : sg.casters) {
+                if (cid < 0 || cid >= int(meshes_.size())) { continue; }
+                Mesh& cm = meshes_[size_t(cid)];
+                gfx_->drawShadowCaster(cm.geomId, cm.world);
+            }
+        }
+    }
 
     int draws = 0;
     for (int meshId : scene.meshIds) {
@@ -406,7 +453,7 @@ int Engine::renderFrame(float timeSec) {
             }
         } else {
             if (mathx::sphereInFrustum(frustum, m.world[12], m.world[13], m.world[14], m.boundRadius * smax)) {
-                gfx_->drawMesh(m.geomId, m.world);
+                gfx_->drawMesh(m.geomId, m.world, m.receiveShadows);
                 ++draws;
             }
         }
@@ -496,6 +543,15 @@ void Engine::registerOn(js::Host& host) {
         const int s = int(argf(info, 0, -1));
         const int l = int(argf(info, 1, -1));
         if (s >= 0 && s < int(scenes_.size())) { scenes_[size_t(s)].lightId = l; }
+        return info.Env().Undefined();
+    });
+    // Directional "sun": the CSM-casting light + a Lambert direct term. Distinct from the
+    // hemispheric fill so a scene can have both (Cedric's benchmark adds both).
+    host.registerFunction("__bl_setSceneSun", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int s = int(argf(info, 0, -1));
+        const int l = int(argf(info, 1, -1));
+        if (s >= 0 && s < int(scenes_.size())) { scenes_[size_t(s)].sunId = l; }
+        if (l >= 0 && l < int(lights_.size())) { lights_[size_t(l)].directional = true; }
         return info.Env().Undefined();
     });
 
@@ -598,6 +654,55 @@ void Engine::registerOn(js::Host& host) {
         const int m = int(argf(info, 1, -1));
         if (s >= 0 && s < int(scenes_.size()) && m >= 0 && m < int(meshes_.size())) {
             scenes_[size_t(s)].meshIds.push_back(m);
+        }
+        return info.Env().Undefined();
+    });
+
+    // --- cloning (no-instancing: each clone is its own mesh, sharing the source's GPU
+    //     geometry + material, with a baked world matrix) ---
+    host.registerFunction("__bl_cloneMeshWithWorld", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int src = int(argf(info, 0, -1));
+        size_t bytes = 0;
+        const uint8_t* mb = js::argBytes(info, 1, &bytes);
+        if (src < 0 || src >= int(meshes_.size()) || !mb || bytes < 16 * sizeof(float)) {
+            return Napi::Number::New(info.Env(), -1);
+        }
+        // Read everything from the source before push_back (which may reallocate meshes_).
+        const Mesh& s = meshes_[size_t(src)];
+        Mesh m;
+        m.geomId = s.geomId;
+        m.materialId = s.materialId;
+        m.pbr = s.pbr;
+        m.boundRadius = s.boundRadius;
+        m.hasBaseMatrix = true;
+        std::memcpy(m.baseMatrix, reinterpret_cast<const float*>(mb), 16 * sizeof(float));
+        meshes_.push_back(std::move(m));
+        return Napi::Number::New(info.Env(), int(meshes_.size() - 1));
+    });
+    // World matrix of a (loaded) mesh, so the JS clone helper can bake group·sourceWorld.
+    host.registerFunction("__bl_getMeshWorld", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int id = int(argf(info, 0, -1));
+        float w[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        if (id >= 0 && id < int(meshes_.size())) {
+            Mesh& m = meshes_[size_t(id)];
+            if (m.node >= 0 && m.node < int(nodes_.size())) {
+                for (Node& n : nodes_) { n.worldDone = false; }
+                computeNodeWorld(m.node);
+                std::memcpy(w, nodes_[size_t(m.node)].world, sizeof(w));
+            } else {
+                for (Mesh& mm : meshes_) { mm.worldDone = false; }
+                computeWorld(id);
+                std::memcpy(w, m.world, sizeof(w));
+            }
+        }
+        Napi::Float32Array out = Napi::Float32Array::New(info.Env(), 16);
+        std::memcpy(out.Data(), w, sizeof(w));
+        return out;
+    });
+    host.registerFunction("__bl_setReceiveShadows", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int id = int(argf(info, 0, -1));
+        if (id >= 0 && id < int(meshes_.size())) {
+            meshes_[size_t(id)].receiveShadows = argf(info, 1, 0) != 0.0;
         }
         return info.Env().Undefined();
     });
@@ -1021,6 +1126,43 @@ void Engine::registerOn(js::Host& host) {
         m.texNormal = int(argf(info, 14, -1));
         m.texEmissive = int(argf(info, 15, -1));
         m.texOcclusion = int(argf(info, 16, -1));
+        return info.Env().Undefined();
+    });
+
+    // --- cascaded shadow maps (directional CSM; ESM/PCF factories collapse onto this) ---
+    host.registerFunction("__bl_createShadowGen", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        ShadowGen g;
+        g.lightId = int(argf(info, 0, -1));
+        g.mapSize = int(argf(info, 1, 2048));
+        g.numCascades = int(argf(info, 2, 4));
+        g.lambda = float(argf(info, 3, 0.7));
+        g.bias = float(argf(info, 4, 0.0008));
+        if (g.numCascades < 1) { g.numCascades = 1; }
+        if (g.numCascades > 4) { g.numCascades = 4; }
+        shadowGens_.push_back(std::move(g));
+        return Napi::Number::New(info.Env(), int(shadowGens_.size() - 1));
+    });
+    host.registerFunction("__bl_setShadowCasters", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int g = int(argf(info, 0, -1));
+        if (g < 0 || g >= int(shadowGens_.size())) { return info.Env().Undefined(); }
+        size_t bytes = 0;
+        const uint8_t* mb = js::argBytes(info, 1, &bytes);
+        std::vector<int>& cs = shadowGens_[size_t(g)].casters;
+        cs.clear();
+        if (mb) {
+            const int32_t* ids = reinterpret_cast<const int32_t*>(mb);
+            const size_t n = bytes / sizeof(int32_t);
+            for (size_t i = 0; i < n; ++i) { cs.push_back(ids[i]); }
+        }
+        return info.Env().Undefined();
+    });
+    host.registerFunction("__bl_enableShadows", [this](const Napi::CallbackInfo& info) -> Napi::Value {
+        const int s = int(argf(info, 0, -1));
+        const int g = int(argf(info, 1, -1));
+        if (s >= 0 && s < int(scenes_.size())) {
+            scenes_[size_t(s)].shadows = true;
+            scenes_[size_t(s)].shadowGenId = g;
+        }
         return info.Env().Undefined();
     });
 

@@ -37,6 +37,46 @@ bool readFileBytes(const char* path, std::vector<uint8_t>& out) {
     return true;
 }
 
+// Column-major matrix product out = a * b, matching getViewProj()'s convention (so a CSM
+// cascade VP built here multiplies in the shader exactly like the main view-proj does).
+void mulColMajor(float out[16], const float a[16], const float b[16]) {
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) { s += a[k * 4 + r] * b[c * 4 + k]; }
+            out[c * 4 + r] = s;
+        }
+    }
+}
+
+void normalize3(float v[3]) {
+    const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const float inv = l > 1e-8f ? 1.0f / l : 1.0f;
+    v[0] *= inv; v[1] *= inv; v[2] *= inv;
+}
+
+void cross3(float out[3], const float a[3], const float b[3]) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+// Practical (PSSM) split: lambda blends logarithmic and uniform distance splits.
+float practicalSplit(int i, int n, float nearZ, float farZ, float lambda) {
+    const float p = float(i) / float(n);
+    const float logS = nearZ * std::pow(farZ / nearZ, p);
+    const float uniS = nearZ + (farZ - nearZ) * p;
+    return lambda * logS + (1.0f - lambda) * uniS;
+}
+
+// Largest column scale of a column-major affine matrix (for a bounding-sphere radius).
+float maxColumnScale(const float m[16]) {
+    const float sx = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+    const float sy = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+    const float sz = std::sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+    return std::fmax(sx, std::fmax(sy, sz));
+}
+
 } // namespace
 
 void Gfx::setShadersDir(const char* dir) {
@@ -148,6 +188,26 @@ bool Gfx::initialize() {
         std::fprintf(stderr, "[gfx] skinned vertex shader missing (skinning disabled)\n");
     }
 
+    // ---- CSM shadow pipeline (vs_shadow + fs_shadow → R32F depth atlas) ----
+    {
+        bgfx::ShaderHandle shvsh = loadShader("vs_shadow.bin");
+        bgfx::ShaderHandle shfsh = loadShader("fs_shadow.bin");
+        if (bgfx::isValid(shvsh) && bgfx::isValid(shfsh)) {
+            shadowProgram_ = bgfx::createProgram(shvsh, shfsh, true);
+        }
+        if (!bgfx::isValid(shadowProgram_)) {
+            std::fprintf(stderr, "[gfx] shadow program unavailable (CSM disabled)\n");
+        }
+        uCsmVP_ = bgfx::createUniform("u_csmVP", bgfx::UniformType::Mat4, 4);
+        uCsmSplits_ = bgfx::createUniform("u_csmSplits", bgfx::UniformType::Vec4);
+        uShadowParams_ = bgfx::createUniform("u_shadowParams", bgfx::UniformType::Vec4);
+        uShadowEnable_ = bgfx::createUniform("u_shadowEnable", bgfx::UniformType::Vec4);
+        uSunDir_ = bgfx::createUniform("u_sunDir", bgfx::UniformType::Vec4);
+        uSunColor_ = bgfx::createUniform("u_sunColor", bgfx::UniformType::Vec4);
+        uCamForward_ = bgfx::createUniform("u_camForward", bgfx::UniformType::Vec4);
+        sShadowAtlas_ = bgfx::createUniform("s_shadowAtlas", bgfx::UniformType::Sampler);
+    }
+
     // Default 1x1 textures for unbound slots.
     const uint8_t white[4] = { 255, 255, 255, 255 };
     const uint8_t flatN[4] = { 128, 128, 255, 255 };
@@ -204,6 +264,137 @@ void Gfx::setEnvironmentParams(float intensity, float exposure, float lodScale, 
     envParams2_[1] = contrast;
 }
 
+void Gfx::setSun(float dx, float dy, float dz, float r, float g, float b) {
+    sunDir_[0] = dx; sunDir_[1] = dy; sunDir_[2] = dz;
+    normalize3(sunDir_);
+    sunColor_[0] = r; sunColor_[1] = g; sunColor_[2] = b;
+}
+
+void Gfx::ensureShadowTargets(int mapSize) {
+    if (mapSize < 256) { mapSize = 256; }
+    if (mapSize > 4096) { mapSize = 4096; } // 2x2 atlas tile cap (atlas ≤ 8192²)
+    if (shadowMapSize_ == mapSize && bgfx::isValid(shadowFb_)) { return; }
+    if (bgfx::isValid(shadowFb_)) { bgfx::destroy(shadowFb_); shadowFb_ = BGFX_INVALID_HANDLE; }
+    if (bgfx::isValid(shadowAtlas_)) { bgfx::destroy(shadowAtlas_); shadowAtlas_ = BGFX_INVALID_HANDLE; }
+    if (bgfx::isValid(shadowDepth_)) { bgfx::destroy(shadowDepth_); shadowDepth_ = BGFX_INVALID_HANDLE; }
+    shadowMapSize_ = mapSize;
+    const uint16_t dim = uint16_t(mapSize * 2);
+    const uint64_t rt = BGFX_TEXTURE_RT | BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT
+                        | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+    shadowAtlas_ = bgfx::createTexture2D(dim, dim, false, 1, bgfx::TextureFormat::R32F, rt);
+    shadowDepth_ = bgfx::createTexture2D(dim, dim, false, 1, bgfx::TextureFormat::D32F, BGFX_TEXTURE_RT_WRITE_ONLY);
+    bgfx::TextureHandle att[2] = { shadowAtlas_, shadowDepth_ };
+    shadowFb_ = bgfx::createFrameBuffer(2, att, true);
+    if (!bgfx::isValid(shadowFb_)) {
+        std::fprintf(stderr, "[gfx] shadow framebuffer creation failed (mapSize=%d)\n", mapSize);
+    }
+}
+
+void Gfx::beginShadowPass(int mapSize, int numCascades, float lambda, float bias,
+                          const float sceneCenter[3], float sceneRadius) {
+    if (!bgfx::isValid(shadowProgram_)) { return; }
+    if (numCascades < 1) { numCascades = 1; }
+    if (numCascades > 4) { numCascades = 4; }
+    ensureShadowTargets(mapSize);
+    if (!bgfx::isValid(shadowFb_)) { return; }
+    shadowCascades_ = numCascades;
+    shadowBias_ = bias;
+    shadowsActive_ = true;
+
+    // Camera basis from eye→target.
+    float fwd[3] = { camTarget_[0] - eyePos_[0], camTarget_[1] - eyePos_[1], camTarget_[2] - eyePos_[2] };
+    normalize3(fwd);
+    camForward_[0] = fwd[0]; camForward_[1] = fwd[1]; camForward_[2] = fwd[2];
+    const float worldUp[3] = { 0, 1, 0 };
+    float right[3]; cross3(right, fwd, worldUp); normalize3(right);
+    float up[3]; cross3(up, right, fwd); normalize3(up);
+
+    // Cap the shadowed distance to the caster sphere so the cascades stay tight.
+    float toCenter[3] = { sceneCenter[0] - eyePos_[0], sceneCenter[1] - eyePos_[1], sceneCenter[2] - eyePos_[2] };
+    const float camDist = std::sqrt(toCenter[0] * toCenter[0] + toCenter[1] * toCenter[1] + toCenter[2] * toCenter[2]);
+    float shadowNear = camNear_;
+    float shadowFar = std::fmin(camFar_, camDist + sceneRadius);
+    if (shadowFar <= shadowNear) { shadowFar = shadowNear + sceneRadius * 2.0f + 1.0f; }
+
+    const float tanH = std::tan(0.5f * camFovYDeg_ * 3.14159265358979323846f / 180.0f);
+    const float tanW = tanH * aspect_;
+
+    float L[3] = { sunDir_[0], sunDir_[1], sunDir_[2] };
+    normalize3(L);
+
+    // Shadow cascades (views 1..N) must execute before the main pass (view 0).
+    const bgfx::ViewId order[5] = { 1, 2, 3, 4, 0 };
+    bgfx::setViewOrder(0, 5, order);
+
+    for (int i = 0; i < numCascades; ++i) {
+        const float sNear = practicalSplit(i, numCascades, shadowNear, shadowFar, lambda);
+        const float sFar = practicalSplit(i + 1, numCascades, shadowNear, shadowFar, lambda);
+        csmSplits_[i] = sFar;
+
+        // 8 world corners of this frustum slice → its bounding sphere (stable cascade).
+        float cen[3] = { 0, 0, 0};
+        float corners[8][3];
+        int ci = 0;
+        for (int fi = 0; fi < 2; ++fi) {
+            const float d = (fi == 0) ? sNear : sFar;
+            const float hh = d * tanH, hw = d * tanW;
+            const float cd[3] = { eyePos_[0] + fwd[0] * d, eyePos_[1] + fwd[1] * d, eyePos_[2] + fwd[2] * d };
+            for (int sy = -1; sy <= 1; sy += 2) {
+                for (int sx = -1; sx <= 1; sx += 2) {
+                    corners[ci][0] = cd[0] + right[0] * hw * float(sx) + up[0] * hh * float(sy);
+                    corners[ci][1] = cd[1] + right[1] * hw * float(sx) + up[1] * hh * float(sy);
+                    corners[ci][2] = cd[2] + right[2] * hw * float(sx) + up[2] * hh * float(sy);
+                    cen[0] += corners[ci][0]; cen[1] += corners[ci][1]; cen[2] += corners[ci][2];
+                    ++ci;
+                }
+            }
+        }
+        cen[0] /= 8.0f; cen[1] /= 8.0f; cen[2] /= 8.0f;
+        float rad = 0.0f;
+        for (int k = 0; k < 8; ++k) {
+            const float dx = corners[k][0] - cen[0], dy = corners[k][1] - cen[1], dz = corners[k][2] - cen[2];
+            rad = std::fmax(rad, std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        rad = std::ceil(rad * 16.0f) / 16.0f;
+
+        const bx::Vec3 at = { cen[0], cen[1], cen[2] };
+        const bx::Vec3 from = { cen[0] - L[0] * rad * 2.0f, cen[1] - L[1] * rad * 2.0f, cen[2] - L[2] * rad * 2.0f };
+        const bx::Vec3 lup = (std::fabs(L[1]) > 0.99f) ? bx::Vec3{ 1, 0, 0 } : bx::Vec3{ 0, 1, 0 };
+        float lview[16];
+        bx::mtxLookAt(lview, from, at, lup);
+        const bool hd = bgfx::getCaps()->homogeneousDepth;
+        float lproj[16];
+        bx::mtxOrtho(lproj, -rad, rad, -rad, rad, 0.0f, rad * 4.0f, 0.0f, hd);
+        mulColMajor(csmVP_[i], lproj, lview);
+
+        const uint16_t ms = uint16_t(shadowMapSize_);
+        const uint16_t qx = (i == 1 || i == 3) ? ms : 0;
+        const uint16_t qy = (i >= 2) ? ms : 0;
+        const bgfx::ViewId vid = bgfx::ViewId(kShadowView0 + i);
+        bgfx::setViewFrameBuffer(vid, shadowFb_);
+        bgfx::setViewRect(vid, qx, qy, ms, ms);
+        bgfx::setViewClear(vid, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0xffffffff, 1.0f, 0);
+        bgfx::setViewTransform(vid, lview, lproj);
+        bgfx::touch(vid);
+    }
+    for (int i = numCascades; i < 4; ++i) { csmSplits_[i] = csmSplits_[numCascades - 1]; }
+}
+
+void Gfx::drawShadowCaster(int meshId, const float world[16]) {
+    if (!shadowsActive_ || !bgfx::isValid(shadowProgram_)) { return; }
+    if (meshId < 0 || meshId >= int(meshes_.size())) { return; }
+    const Mesh& m = meshes_[size_t(meshId)];
+    const bool dyn = bgfx::isValid(m.dvbh);
+    if (!dyn && !bgfx::isValid(m.vbh)) { return; }
+    for (int i = 0; i < shadowCascades_; ++i) {
+        bgfx::setTransform(world);
+        if (dyn) { bgfx::setVertexBuffer(0, m.dvbh); } else { bgfx::setVertexBuffer(0, m.vbh); }
+        if (bgfx::isValid(m.ibh)) { bgfx::setIndexBuffer(m.ibh); }
+        bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS);
+        bgfx::submit(bgfx::ViewId(kShadowView0 + i), shadowProgram_);
+    }
+}
+
 void Gfx::shutdown() {
     for (auto& m : meshes_) {
         if (bgfx::isValid(m.vbh)) { bgfx::destroy(m.vbh); }
@@ -223,9 +414,16 @@ void Gfx::shutdown() {
     }
     if (bgfx::isValid(program_)) { bgfx::destroy(program_); program_ = BGFX_INVALID_HANDLE; }
     if (bgfx::isValid(pbrProgram_)) { bgfx::destroy(pbrProgram_); pbrProgram_ = BGFX_INVALID_HANDLE; }
+    if (bgfx::isValid(shadowFb_)) { bgfx::destroy(shadowFb_); shadowFb_ = BGFX_INVALID_HANDLE; }
+    if (bgfx::isValid(shadowProgram_)) { bgfx::destroy(shadowProgram_); shadowProgram_ = BGFX_INVALID_HANDLE; }
+    for (bgfx::UniformHandle* u : { &uCsmVP_, &uCsmSplits_, &uShadowParams_, &uShadowEnable_,
+                                    &uSunDir_, &uSunColor_, &uCamForward_, &sShadowAtlas_ }) {
+        if (bgfx::isValid(*u)) { bgfx::destroy(*u); *u = BGFX_INVALID_HANDLE; }
+    }
 }
 
 void Gfx::beginFrame(int width, int height) {
+    shadowsActive_ = false;
     aspect_ = (height > 0) ? (float(width) / float(height)) : 1.0f;
     applyCamera();
     bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, clearRgba_, 1.0f, 0);
@@ -329,14 +527,34 @@ void Gfx::bindStandardUniforms() {
     bgfx::setUniform(uDiffuseColor_, mDiffuse_);
     bgfx::setUniform(uSpecular_, mSpecular_);
     bgfx::setUniform(uEyePos_, eyePos_);
+    bindShadowUniforms();
 }
 
-void Gfx::drawMesh(int meshId, const float worldMatrix[16]) {
+// Bind the directional-sun + CSM uniforms for the standard program. Always called (so the
+// sampler/uniforms are defined); u_sunColor is 0 and u_shadowEnable is per-draw, so scenes
+// without a sun render exactly as before.
+void Gfx::bindShadowUniforms() {
+    bgfx::setUniform(uCsmVP_, csmVP_, 4);
+    bgfx::setUniform(uCsmSplits_, csmSplits_);
+    const bool obl = bgfx::getCaps()->originBottomLeft;
+    const float atlasTexel = shadowMapSize_ > 0 ? 1.0f / float(shadowMapSize_ * 2) : 0.0f;
+    const float params[4] = { float(shadowCascades_ > 0 ? shadowCascades_ : 1), shadowBias_, atlasTexel, obl ? 1.0f : 0.0f };
+    bgfx::setUniform(uShadowParams_, params);
+    bgfx::setUniform(uSunDir_, sunDir_);
+    bgfx::setUniform(uSunColor_, sunColor_);
+    bgfx::setUniform(uCamForward_, camForward_);
+    const bgfx::TextureHandle atlas = (shadowsActive_ && bgfx::isValid(shadowAtlas_)) ? shadowAtlas_ : whiteTex_;
+    bgfx::setTexture(0, sShadowAtlas_, atlas);
+}
+
+void Gfx::drawMesh(int meshId, const float worldMatrix[16], bool receiveShadows) {
     if (meshId < 0 || meshId >= int(meshes_.size())) {
         return;
     }
     const Mesh& m = meshes_[meshId];
     bindStandardUniforms();
+    const float en[4] = { (receiveShadows && shadowsActive_) ? 1.0f : 0.0f, 0, 0, 0 };
+    bgfx::setUniform(uShadowEnable_, en);
     bgfx::setTransform(worldMatrix);
     bgfx::setVertexBuffer(0, m.vbh);
     bgfx::setIndexBuffer(m.ibh);
@@ -355,6 +573,8 @@ int Gfx::drawInstances(int meshId, const float* worldMatrices, uint32_t count) {
     int draws = 0;
     for (uint32_t i = 0; i < count; ++i) {
         bindStandardUniforms();
+        const float en[4] = { 0, 0, 0, 0 };
+        bgfx::setUniform(uShadowEnable_, en);
         bgfx::setTransform(worldMatrices + size_t(i) * 16);
         bgfx::setVertexBuffer(0, m.vbh);
         bgfx::setIndexBuffer(m.ibh);

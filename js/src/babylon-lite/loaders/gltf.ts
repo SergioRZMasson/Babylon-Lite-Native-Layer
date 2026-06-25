@@ -6,7 +6,7 @@
 // byteStride de-stride + normalized integers), metallic-roughness materials, embedded
 // PNG/JPEG textures, node hierarchy, and the Babylon RH→LH root (diag(-1,1,1)).
 
-import { utf8Decode, base64ToBytes, growBounds } from "../internal.js";
+import { utf8Decode, base64ToBytes, growBounds, state } from "../internal.js";
 import { mat4Compose, mat4Multiply, mat4TransformPoint, decomposeMat4 } from "../math.js";
 import { resolveUrl, ensureCached } from "../net.js";
 
@@ -401,7 +401,30 @@ function loadGltfSync(engine, url) {
     // Animations (orchestrated natively) — channels reference glTF node indices, offset
     // by nodeBase to match the native node graph.
     const animationGroups = parseAnimations(json, buffers, nodeBase);
-    return Promise.resolve({ _kind: "container", _meshIds: meshIds, animationGroups: animationGroups });
+
+    // Capture each loaded mesh's baked world matrix + the model's world AABB so the clone
+    // helpers (cloneTransformNode / getContainerMeshes) can instantiate copies and measure
+    // the template. `entities[0]` is a template root that clones reference.
+    const srcMeshes = [];
+    for (let i = 0; i < meshIds.length; i++) {
+        srcMeshes.push({ id: meshIds[i], world: __bl_getMeshWorld(meshIds[i]) });
+    }
+    const b = state.bounds;
+    const boundMin = b ? [b.min[0], b.min[1], b.min[2]] : [-0.5, -0.5, -0.5];
+    const boundMax = b ? [b.max[0], b.max[1], b.max[2]] : [0.5, 0.5, 0.5];
+    const templateRoot: any = { _kind: "templateRoot", _srcMeshes: srcMeshes };
+    templateRoot.position = { x: 0, y: 0, z: 0 };
+    templateRoot.scaling = { x: 1, y: 1, z: 1 };
+    templateRoot.rotation = { x: 0, y: 0, z: 0 };
+    return Promise.resolve({
+        _kind: "container",
+        _meshIds: meshIds,
+        _srcMeshes: srcMeshes,
+        entities: [templateRoot],
+        boundMin: boundMin,
+        boundMax: boundMax,
+        animationGroups: animationGroups,
+    });
 }
 
 // Public entry: download the glTF/GLB (and, for a .gltf, its external buffers + image

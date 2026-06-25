@@ -18,7 +18,16 @@ declare global {
     function __bl_setClearColor(sceneId: number, r: number, g: number, b: number, a: number): void;
     function __bl_setSceneCamera(sceneId: number, cameraId: number): void;
     function __bl_setSceneLight(sceneId: number, lightId: number): void;
+    function __bl_setSceneSun(sceneId: number, lightId: number): void;
     function __bl_addMeshToScene(sceneId: number, meshId: number): void;
+    function __bl_cloneMeshWithWorld(srcMeshId: number, worldMatrix: Float32Array): number;
+    function __bl_getMeshWorld(meshId: number): Float32Array;
+    function __bl_setReceiveShadows(meshId: number, receive: number): void;
+
+    // cascaded shadow maps
+    function __bl_createShadowGen(lightId: number, mapSize: number, numCascades: number, lambda: number, bias: number): number;
+    function __bl_setShadowCasters(genId: number, meshIds: Int32Array): void;
+    function __bl_enableShadows(sceneId: number, genId: number): void;
 
     // camera
     function __bl_createCamera(alpha: number, beta: number, radius: number, tx: number, ty: number, tz: number): number;
