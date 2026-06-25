@@ -5,7 +5,9 @@
 #include "mathx.h"
 #include "napi_helpers.h"
 
-#include "third_party/stb_image.h"
+#include <bimg/decode.h>
+#include <bx/allocator.h>
+#include <bx/error.h>
 
 #include <cmath>
 #include <cstdint>
@@ -20,6 +22,23 @@ namespace lite {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
+
+// Decode an encoded image (PNG/JPEG) to tightly-packed RGBA8 via bimg (the image library
+// bgfx already ships). Returns the bimg ImageContainer (RGBA8, owns the pixels) or nullptr;
+// the caller reads m_data/m_width/m_height and frees with bimg::imageFree. Replaces the
+// previously-vendored stb_image so we don't carry a second image decoder in the binary.
+bimg::ImageContainer* decodeImageRGBA8(const uint8_t* data, size_t size) {
+    static bx::DefaultAllocator s_allocator;
+    if (!data || size == 0) { return nullptr; }
+    bx::Error err;
+    bimg::ImageContainer* img = bimg::imageParse(&s_allocator, data, uint32_t(size),
+                                                 bimg::TextureFormat::RGBA8, &err);
+    if (!img || !err.isOk()) {
+        if (img) { bimg::imageFree(img); }
+        return nullptr;
+    }
+    return img;
+}
 
 std::string baseName(const std::string& p) {
     const size_t s = p.find_last_of("/\\");
@@ -955,11 +974,11 @@ void Engine::registerOn(js::Host& host) {
         size_t bytes = 0;
         const uint8_t* png = js::argBytes(info, 2, &bytes);
         if (!png || bytes == 0) { return info.Env().Undefined(); }
-        int w = 0, h = 0, comp = 0;
-        stbi_uc* px = stbi_load_from_memory(png, int(bytes), &w, &h, &comp, 4);
-        if (px) {
-            gfx_->uploadEnvFace(mip, face, w, h, px);
-            stbi_image_free(px);
+        bimg::ImageContainer* img = decodeImageRGBA8(png, bytes);
+        if (img) {
+            gfx_->uploadEnvFace(mip, face, int(img->m_width), int(img->m_height),
+                                static_cast<const uint8_t*>(img->m_data));
+            bimg::imageFree(img);
         }
         return info.Env().Undefined();
     });
@@ -1087,11 +1106,11 @@ void Engine::registerOn(js::Host& host) {
         size_t bytes = 0;
         const uint8_t* enc = js::argBytes(info, 0, &bytes);
         if (!enc || bytes == 0) { return Napi::Number::New(env, -1); }
-        int w = 0, h = 0, comp = 0;
-        stbi_uc* px = stbi_load_from_memory(enc, int(bytes), &w, &h, &comp, 4);
-        if (!px) { return Napi::Number::New(env, -1); }
-        const int id = gfx_->createTexture2D(w, h, px);
-        stbi_image_free(px);
+        bimg::ImageContainer* img = decodeImageRGBA8(enc, bytes);
+        if (!img) { return Napi::Number::New(env, -1); }
+        const int id = gfx_->createTexture2D(int(img->m_width), int(img->m_height),
+                                             static_cast<const uint8_t*>(img->m_data));
+        bimg::imageFree(img);
         return Napi::Number::New(env, id);
     });
 

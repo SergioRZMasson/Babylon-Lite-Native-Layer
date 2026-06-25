@@ -10,12 +10,12 @@ if(NOT WIN32)
 endif()
 
 # ---------------------------------------------------------------------------
-# Optional aggressive size optimization (cmake -DMINIMIZE_SIZE=ON). Applies LTO
-# (whole-program dead-code elimination), /Os, function/data-level linking +
-# dead-strip, and trims bgfx to the D3D11 backend only. Set BEFORE FetchContent so
-# the bgfx/napi targets inherit it.
+# Aggressive size optimization. ON by default (we always want the smallest binary):
+# applies LTO (whole-program dead-code elimination), /Os, function/data-level linking +
+# dead-strip. Set BEFORE FetchContent so the bgfx/napi targets inherit it. Turn off for a
+# faster (non-LTO) debug/iteration build with -DMINIMIZE_SIZE=OFF.
 # ---------------------------------------------------------------------------
-option(MINIMIZE_SIZE "Aggressively optimize for binary size" OFF)
+option(MINIMIZE_SIZE "Aggressively optimize for binary size" ON)
 if(MINIMIZE_SIZE)
     cmake_policy(SET CMP0069 NEW)
     set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
@@ -30,7 +30,7 @@ include(FetchContent)
 
 # ---------------------------------------------------------------------------
 # bgfx (BabylonJS fork, pinned to the same tag Babylon Native uses so we render
-# "the same way Babylon Native does"). D3D11 backend.
+# "the same way Babylon Native does"). D3D12 backend only.
 # ---------------------------------------------------------------------------
 set(BGFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BGFX_BUILD_TOOLS ON CACHE BOOL "" FORCE)              # need shaderc to compile .sc shaders
@@ -48,24 +48,48 @@ FetchContent_Declare(bgfx_cmake
     GIT_TAG be578c80f6c1c1e4d2b5baa163bd452f1d3b88fa)
 FetchContent_MakeAvailable(bgfx_cmake)
 
-# Enable the D3D11 + D3D12 renderers (selected at runtime; the benchmark uses D3D12 via
-# --d3d12). Defining one BGFX_CONFIG_RENDERER_* turns the rest off, so enable both we use.
-target_compile_definitions(bgfx PRIVATE BGFX_CONFIG_RENDERER_DIRECT3D11=1 BGFX_CONFIG_RENDERER_DIRECT3D12=1)
+# D3D12-ONLY: compile just the Direct3D12 renderer into bgfx and drop every other backend
+# (D3D11/D3D9/GL/GLES/Vulkan/Metal/WebGPU/GNM/NVN/AGC) so none of that code is in the binary.
+# Our app targets D3D12 exclusively (src/main.cpp inits bgfx::RendererType::Direct3D12).
+target_compile_definitions(bgfx PRIVATE
+    BGFX_CONFIG_RENDERER_DIRECT3D12=1
+    BGFX_CONFIG_RENDERER_DIRECT3D11=0
+    BGFX_CONFIG_RENDERER_DIRECT3D9=0
+    BGFX_CONFIG_RENDERER_OPENGL=0
+    BGFX_CONFIG_RENDERER_OPENGLES=0
+    BGFX_CONFIG_RENDERER_VULKAN=0
+    BGFX_CONFIG_RENDERER_METAL=0
+    BGFX_CONFIG_RENDERER_WEBGPU=0
+    BGFX_CONFIG_RENDERER_GNM=0
+    BGFX_CONFIG_RENDERER_NVN=0
+    BGFX_CONFIG_RENDERER_AGC=0)
 
-# Size build: compile ONLY the D3D11 renderer into bgfx (drop GL/GLES/D3D12/Vulkan/
-# Metal/WebGPU/etc. code paths entirely).
-if(MINIMIZE_SIZE)
-    target_compile_definitions(bgfx PRIVATE
-        BGFX_CONFIG_RENDERER_OPENGL=0
-        BGFX_CONFIG_RENDERER_OPENGLES=0
-        BGFX_CONFIG_RENDERER_DIRECT3D9=0
-        BGFX_CONFIG_RENDERER_DIRECT3D12=0
-        BGFX_CONFIG_RENDERER_VULKAN=0
-        BGFX_CONFIG_RENDERER_METAL=0
-        BGFX_CONFIG_RENDERER_WEBGPU=0
-        BGFX_CONFIG_RENDERER_GNM=0
-        BGFX_CONFIG_RENDERER_NVN=0
-        BGFX_CONFIG_RENDERER_AGC=0)
+# ---------------------------------------------------------------------------
+# Trim bimg's image parsers to just the formats we actually load. bimg_decode's
+# image_decode.cpp pulls in a decoder per BIMG_CONFIG_PARSE_<FMT> (all default ON): PNG
+# (lodepng), JPEG (stb_image) and — notably large — EXR (tinyexr), plus BMP/GIF/HDR/PIC/
+# PNM/PSD/TGA (stb_image). We only decode glTF textures (PNG/JPEG) and .env faces (PNG), so
+# disable the rest. These are #ifndef-guarded, so PRIVATE compile defs on bimg_decode (set
+# before it builds) win. Toggle individual formats with -DBL_PARSE_<FMT>=ON if ever needed.
+# ---------------------------------------------------------------------------
+option(BL_PARSE_PNG  "bimg: parse PNG (glTF + .env)" ON)
+option(BL_PARSE_JPEG "bimg: parse JPEG (glTF)"        ON)
+option(BL_PARSE_BMP  "bimg: parse BMP"  OFF)
+option(BL_PARSE_EXR  "bimg: parse EXR (pulls tinyexr)" OFF)
+option(BL_PARSE_GIF  "bimg: parse GIF"  OFF)
+option(BL_PARSE_HDR  "bimg: parse HDR"  OFF)
+option(BL_PARSE_PIC  "bimg: parse PIC"  OFF)
+option(BL_PARSE_PNM  "bimg: parse PNM"  OFF)
+option(BL_PARSE_PSD  "bimg: parse PSD"  OFF)
+option(BL_PARSE_TGA  "bimg: parse TGA"  OFF)
+if(TARGET bimg_decode)
+    foreach(_fmt PNG JPEG BMP EXR GIF HDR PIC PNM PSD TGA)
+        if(BL_PARSE_${_fmt})
+            target_compile_definitions(bimg_decode PRIVATE BIMG_CONFIG_PARSE_${_fmt}=1)
+        else()
+            target_compile_definitions(bimg_decode PRIVATE BIMG_CONFIG_PARSE_${_fmt}=0)
+        endif()
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -182,12 +206,14 @@ add_executable(app
     src/gfx.cpp
     src/scene.cpp
     src/lite.cpp
-    src/bench.cpp
-    src/third_party/impl.cpp)
+    src/bench.cpp)
 add_dependencies(app shaders)
 
-target_include_directories(app PRIVATE src src/js src/third_party)
-target_link_libraries(app PRIVATE bgfx bx bimg napi)
+target_include_directories(app PRIVATE src src/js)
+# Texture/IBL-face decoding uses bimg (already shipped by bgfx) instead of a separately
+# vendored stb_image, so the binary carries a single image library. bimg_decode provides
+# bimg::imageParse; its parser set is trimmed below to just the formats we load.
+target_link_libraries(app PRIVATE bgfx bx bimg bimg_decode napi)
 target_compile_definitions(app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
     BL_JS_ENGINE="${JS_ENGINE}")
 # Boolean engine selector so the host (src/js/js_host.cpp) compiles the right bootstrap

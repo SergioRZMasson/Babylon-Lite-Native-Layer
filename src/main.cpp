@@ -70,7 +70,7 @@ struct Args {
     bool warp = false;
     bool bench = false;
     bool noVsync = false;  // present-immediate / drop BGFX_RESET_VSYNC (pure throughput)
-    bool d3d12 = false;    // use the Direct3D12 backend (benchmark target) instead of D3D11
+    bool d3d12 = false;    // accepted for back-compat; D3D12 is now the only bgfx backend
     bool showFps = false;  // live on-screen FPS overlay (default on in windowed mode)
     int grid = 0;          // 0 = let the script choose
     std::string cpu = "native";
@@ -94,6 +94,7 @@ Args parseArgs(int argc, char** argv) {
         } else if (s == "--warp") {
             a.warp = true;
         } else if (s == "--d3d12") {
+            // Accepted for backward compatibility; D3D12 is now the only backend.
             a.d3d12 = true;
         } else if (s == "--bench") {
             a.bench = true;
@@ -198,7 +199,8 @@ int main(int argc, char** argv) {
     const uint32_t resetFlags = cli.bench ? BGFX_RESET_NONE : BGFX_RESET_VSYNC;
     BgfxCallback callback;
     bgfx::Init init;
-    init.type = cli.d3d12 ? bgfx::RendererType::Direct3D12 : bgfx::RendererType::Direct3D11;
+    // D3D12-only build (bgfx is compiled with just the Direct3D12 backend; see CMakeLists).
+    init.type = bgfx::RendererType::Direct3D12;
     init.platformData.nwh = window.hwnd();
     init.resolution.width = uint32_t(fbW);
     init.resolution.height = uint32_t(fbH);
