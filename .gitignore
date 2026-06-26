@@ -1,8 +1,5 @@
-# Build output
-/build/
-/build-min/
-/build-poly/
-/build-v8/
+# Build output (any build* directory)
+/build*/
 
 # TypeScript bundler: dependencies + generated bundles (produced by `node js/build.mjs`,
 # copied to <build>/bin/js by the CMake js_bundles target).

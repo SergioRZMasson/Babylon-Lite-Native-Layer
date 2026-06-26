@@ -6,7 +6,26 @@ set(CMAKE_CXX_STANDARD 20)  # bx/bgfx require C++20
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT WIN32)
-    message(FATAL_ERROR "Babylon-Lite-Native-Layer prototype currently targets Windows (D3D12) only.")
+    message(FATAL_ERROR "Babylon-Lite-Native-Layer prototype currently targets Windows (Direct3D) only.")
+endif()
+
+# ---------------------------------------------------------------------------
+# Renderer backend (single API per build → smaller binary). The bgfx config below compiles in
+# exactly this one backend, and the app inits it at runtime (src/main.cpp). Default D3D12.
+#   -DBL_RENDERER=D3D12   (default)
+#   -DBL_RENDERER=D3D11
+# ---------------------------------------------------------------------------
+set(BL_RENDERER "D3D12" CACHE STRING "bgfx renderer backend: D3D12 or D3D11")
+set_property(CACHE BL_RENDERER PROPERTY STRINGS D3D12 D3D11)
+if(NOT BL_RENDERER STREQUAL "D3D12" AND NOT BL_RENDERER STREQUAL "D3D11")
+    message(FATAL_ERROR "BL_RENDERER must be D3D12 or D3D11 (got '${BL_RENDERER}').")
+endif()
+
+# The bumped upstream bx uses SSE4.1 SIMD intrinsics that clang does not enable by default
+# (MSVC does). Give clang the target feature so bx compiles; harmless for MSVC. (The V8 build
+# requires MSVC anyway — see the JS_ENGINE guard below.)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-msse4.1)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -49,12 +68,19 @@ FetchContent_Declare(bgfx_cmake
     GIT_TAG 96d109754035435eeeca8767111233bae62cd317)  # sergio/size-trims-2026
 FetchContent_MakeAvailable(bgfx_cmake)
 
-# D3D12-ONLY: compile just the Direct3D12 renderer into bgfx and drop every other backend
-# (D3D11/D3D9/GL/GLES/Vulkan/Metal/WebGPU/GNM/NVN/AGC) so none of that code is in the binary.
-# Our app targets D3D12 exclusively (src/main.cpp inits bgfx::RendererType::Direct3D12).
+# SINGLE-BACKEND: compile in just the selected renderer (BL_RENDERER) and drop every other
+# backend (D3D9/GL/GLES/Vulkan/Metal/WebGPU/GNM/NVN/AGC + the unused D3D11/12) so none of that
+# code is in the binary. The app inits the matching bgfx::RendererType at runtime.
+if(BL_RENDERER STREQUAL "D3D11")
+    set(_BL_D3D11 1)
+    set(_BL_D3D12 0)
+else()
+    set(_BL_D3D11 0)
+    set(_BL_D3D12 1)
+endif()
 target_compile_definitions(bgfx PRIVATE
-    BGFX_CONFIG_RENDERER_DIRECT3D12=1
-    BGFX_CONFIG_RENDERER_DIRECT3D11=0
+    BGFX_CONFIG_RENDERER_DIRECT3D12=${_BL_D3D12}
+    BGFX_CONFIG_RENDERER_DIRECT3D11=${_BL_D3D11}
     BGFX_CONFIG_RENDERER_DIRECT3D9=0
     BGFX_CONFIG_RENDERER_OPENGL=0
     BGFX_CONFIG_RENDERER_OPENGLES=0
@@ -64,6 +90,7 @@ target_compile_definitions(bgfx PRIVATE
     BGFX_CONFIG_RENDERER_GNM=0
     BGFX_CONFIG_RENDERER_NVN=0
     BGFX_CONFIG_RENDERER_AGC=0)
+message(STATUS "BL_RENDERER = ${BL_RENDERER}")
 
 # Additional bgfx size trims (need the bumped upstream bgfx above) — all perf-neutral:
 #  - C99_API=0: drop the ~67 KB auto-generated bgfx.idl.inl C99 wrappers (we use the C++ API).
@@ -109,9 +136,21 @@ endif()
 option(BL_POLYFILL_URL "Include the JsRuntimeHost URL/URLSearchParams polyfill" ON)
 option(BL_POLYFILL_XMLHTTPREQUEST "Include the JsRuntimeHost XMLHttpRequest polyfill (HTTP downloads; pulls UrlLib)" ON)
 
-set(JS_ENGINE "Chakra" CACHE STRING "JavaScript engine for the Node-API host (Chakra)")
+set(JS_ENGINE "V8" CACHE STRING "JavaScript engine for the Node-API host (V8 or Chakra)")
 set(NAPI_JAVASCRIPT_ENGINE "${JS_ENGINE}" CACHE STRING "" FORCE)
 set(NAPI_BUILD_ABI ON CACHE BOOL "" FORCE)  # compile the engine's Node-API impl from source
+
+# The V8 build (default) links the V8 NuGet, whose JsRuntimeHost arch detection only recognizes
+# the MSVC compiler (cl) — clang is rejected. Fail early here with a clear message instead of a
+# cryptic "Unrecognized compiler" deep in the fetch. Build from a "Developer PowerShell for VS
+# 2022" (cl is then picked automatically) or pass -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl.
+if(JS_ENGINE STREQUAL "V8" AND NOT MSVC)
+    message(FATAL_ERROR
+        "JS_ENGINE=V8 requires the MSVC compiler (cl), but CMake selected "
+        "'${CMAKE_CXX_COMPILER_ID}'. Re-run from a Developer PowerShell for VS 2022 (so cl is "
+        "found first), or add -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl. To build with "
+        "clang/another compiler, use the in-box engine instead: -DJS_ENGINE=Chakra.")
+endif()
 
 set(_BL_POLYFILLS OFF)
 if(BL_POLYFILL_URL OR BL_POLYFILL_XMLHTTPREQUEST)
@@ -224,6 +263,13 @@ if(JS_ENGINE STREQUAL "V8")
     target_compile_definitions(app PRIVATE BL_JS_ENGINE_V8)
 else()
     target_compile_definitions(app PRIVATE BL_JS_ENGINE_CHAKRA)
+endif()
+# Renderer selector so main.cpp inits the bgfx::RendererType that matches the single backend
+# compiled into bgfx above.
+if(BL_RENDERER STREQUAL "D3D11")
+    target_compile_definitions(app PRIVATE BL_RENDERER_D3D11)
+else()
+    target_compile_definitions(app PRIVATE BL_RENDERER_D3D12)
 endif()
 
 # Optional polyfill static libraries (JsRuntimeHost). Each links JsRuntime transitively;

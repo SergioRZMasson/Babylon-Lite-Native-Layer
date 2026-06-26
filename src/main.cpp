@@ -198,8 +198,13 @@ int main(int argc, char** argv) {
     const uint32_t resetFlags = cli.bench ? BGFX_RESET_NONE : BGFX_RESET_VSYNC;
     BgfxCallback callback;
     bgfx::Init init;
-    // D3D12-only build (bgfx is compiled with just the Direct3D12 backend; see CMakeLists).
+    // The renderer backend is fixed at build time (single backend compiled into bgfx for a
+    // smaller binary — see BL_RENDERER in CMakeLists). Init the matching type.
+#if defined(BL_RENDERER_D3D11)
+    init.type = bgfx::RendererType::Direct3D11;
+#else
     init.type = bgfx::RendererType::Direct3D12;
+#endif
     init.platformData.nwh = window.hwnd();
     init.resolution.width = uint32_t(fbW);
     init.resolution.height = uint32_t(fbH);
