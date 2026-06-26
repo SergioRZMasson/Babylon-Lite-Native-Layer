@@ -114,6 +114,11 @@ Args parseArgs(int argc, char** argv) {
             a.scriptPath = argv[++i];
         } else if (s == "--prelude" && i + 1 < argc) {
             a.preludePath = argv[++i];
+        } else if (!s.empty() && s[0] != '-' && a.scriptPath.empty()) {
+            // Bare positional argument = the scene script to run (matches the convention of
+            // Cedric's benchmark harness, which passes the scene .js as a positional arg). The
+            // first one wins; an explicit --script also sets this.
+            a.scriptPath = s;
         }
     }
     return a;
