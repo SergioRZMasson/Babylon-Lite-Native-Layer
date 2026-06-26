@@ -349,8 +349,11 @@ int main(int argc, char** argv) {
     bench::FrameTimer timer;
     if (cli.frames > 0) { timer.reserve(size_t(cli.frames)); }
     // Total render span: wall time from the start of the first frame to the end of the last
-    // (Cedric's "time to render" metric). ms/frame = total / frames.
+    // (Cedric's "time to render" metric). ms/frame = total / frames. We also capture process
+    // CPU time (kernel+user) at the same two points so render_cpu_ms excludes startup + asset
+    // loading, per the benchmark protocol.
     double renderStartMs = 0.0, renderEndMs = 0.0;
+    double renderCpuStartMs = 0.0, renderCpuEndMs = 0.0;
 
     // Live FPS overlay: shown on-screen (bgfx debug text) + printed to the console once
     // per second. On by default in windowed mode (no --frames); force with --show-fps.
@@ -368,7 +371,7 @@ int main(int argc, char** argv) {
             bgfx::reset(uint32_t(fbW), uint32_t(fbH), resetFlags);
             resized = false;
         }
-        if (frameNo == 0) { renderStartMs = bench::monotonicMillis(); }
+        if (frameNo == 0) { renderStartMs = bench::monotonicMillis(); renderCpuStartMs = bench::processCpuMillis(); }
         timer.startFrame();
 
         // Wall-clock frame delta (full loop incl. present/vsync) for the live FPS readout.
@@ -434,6 +437,7 @@ int main(int argc, char** argv) {
 
         bgfx::frame();
         renderEndMs = bench::monotonicMillis();
+        renderCpuEndMs = bench::processCpuMillis();
         timer.endFrame();
         ++frameNo;
 
@@ -452,11 +456,17 @@ int main(int argc, char** argv) {
         const bench::FrameStats fs = timer.finish();
         const double totalMs = (renderEndMs > renderStartMs) ? (renderEndMs - renderStartMs) : 0.0;
         const double msPerFrame = frameNo > 0 ? totalMs / double(frameNo) : 0.0;
-        char extra[224];
+        // render_cpu_ms = process CPU (kernel+user, all threads) consumed strictly across the
+        // render loop (excludes startup + asset loading), per the benchmark protocol.
+        const double renderCpuMs = (renderCpuEndMs > renderCpuStartMs) ? (renderCpuEndMs - renderCpuStartMs) : 0.0;
+        const double renderCpuPerFrame = frameNo > 0 ? renderCpuMs / double(frameNo) : 0.0;
+        char extra[320];
         std::snprintf(extra, sizeof(extra),
-                      "engine=%s gfx=%s drawn=%d total_ms=%.3f ms_per_frame=%.4f fps=%.1f",
+                      "engine=%s gfx=%s drawn=%d total_ms=%.3f ms_per_frame=%.4f fps=%.1f "
+                      "render_cpu_ms=%.3f render_cpu_ms_per_frame=%.4f",
                       BL_JS_ENGINE, bgfx::getRendererName(bgfx::getRendererType()),
-                      lite.lastDrawn(), totalMs, msPerFrame, msPerFrame > 0 ? 1000.0 / msPerFrame : 0.0);
+                      lite.lastDrawn(), totalMs, msPerFrame, msPerFrame > 0 ? 1000.0 / msPerFrame : 0.0,
+                      renderCpuMs, renderCpuPerFrame);
         timer.printBenchLine(cli.sceneName, extra);
     }
     host.shutdown();
